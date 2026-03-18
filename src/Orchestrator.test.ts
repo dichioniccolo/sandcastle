@@ -1,6 +1,8 @@
 import { Effect, Layer } from "effect";
 import { exec } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -11,7 +13,7 @@ import {
   parseStreamJsonLine,
   type OrchestrateOptions,
 } from "./Orchestrator.js";
-import { Sandbox } from "./Sandbox.js";
+import { Sandbox, SandboxError } from "./Sandbox.js";
 import { SandboxFactory } from "./SandboxFactory.js";
 
 const execAsync = promisify(exec);
@@ -52,18 +54,47 @@ const toStreamJson = (output: string): string => {
 };
 
 /**
- * Wrap a Sandbox layer into a SandboxFactory layer.
- * Each withSandbox call provides the given sandbox layer.
+ * Create a mock SandboxFactory that creates a fresh temp directory
+ * and sandbox for each withSandbox call, then cleans it up after.
+ *
+ * Each iteration gets an isolated sandbox: the sandbox directory is
+ * removed and recreated before each call, and cleaned up after.
+ *
+ * @param buildLayer - Given a fresh sandbox dir, return a Sandbox layer
+ * @returns The factory layer and the sandboxRepoDir path to pass to orchestrate
  */
-const wrapAsFactory = (
-  sandboxLayer: Layer.Layer<Sandbox>,
-): Layer.Layer<SandboxFactory> =>
-  Layer.succeed(SandboxFactory, {
-    withSandbox: <A, E, R>(effect: Effect.Effect<A, E, R | Sandbox>) =>
-      effect.pipe(
-        Effect.provide(sandboxLayer),
-      ) as Effect.Effect<A, E, Exclude<R, Sandbox>>,
+const makeTestSandboxFactory = (
+  buildLayer: (sandboxDir: string) => Layer.Layer<Sandbox>,
+): { factoryLayer: Layer.Layer<SandboxFactory>; sandboxRepoDir: string } => {
+  const sandboxBaseDir = join(tmpdir(), `orch-factory-${randomUUID()}`);
+  const sandboxRepoDir = join(sandboxBaseDir, "repo");
+
+  const factoryLayer = Layer.succeed(SandboxFactory, {
+    withSandbox: <A, E, R>(
+      effect: Effect.Effect<A, E, R | Sandbox>,
+    ): Effect.Effect<A, E | SandboxError, Exclude<R, Sandbox>> =>
+      Effect.acquireUseRelease(
+        // Acquire: create fresh sandbox dir (removing any previous state)
+        Effect.promise(async () => {
+          await rm(sandboxBaseDir, { recursive: true, force: true });
+          await mkdir(sandboxBaseDir, { recursive: true });
+          return sandboxBaseDir;
+        }),
+        // Use: provide sandbox layer and run effect
+        (dir) =>
+          effect.pipe(Effect.provide(buildLayer(dir))) as Effect.Effect<
+            A,
+            E | SandboxError,
+            Exclude<R, Sandbox>
+          >,
+        // Release: clean up sandbox dir
+        (dir) =>
+          Effect.promise(() => rm(dir, { recursive: true, force: true })),
+      ),
   });
+
+  return { factoryLayer, sandboxRepoDir };
+};
 
 /**
  * Create a mock sandbox layer that intercepts `claude` commands
@@ -124,23 +155,25 @@ const makeMockAgentLayer = (
 describe("Orchestrator", () => {
   it("runs a single iteration: sync-in, agent, sync-out", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-host-"));
-    const sandboxDir = await mkdtemp(join(tmpdir(), "orch-sandbox-"));
-    const sandboxRepoDir = join(sandboxDir, "repo");
 
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
     // Mock agent: creates a commit in the sandbox repo
-    const layer = makeMockAgentLayer(sandboxDir, async (repoDir) => {
-      await writeFile(join(repoDir, "agent-output.txt"), "agent was here");
-      await execAsync("git add -A", { cwd: repoDir });
-      await execAsync('git config user.email "agent@test.com"', {
-        cwd: repoDir,
-      });
-      await execAsync('git config user.name "Agent"', { cwd: repoDir });
-      await execAsync('git commit -m "RALPH: agent commit"', { cwd: repoDir });
-      return "Done with iteration.";
-    });
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) =>
+      makeMockAgentLayer(dir, async (repoDir) => {
+        await writeFile(join(repoDir, "agent-output.txt"), "agent was here");
+        await execAsync("git add -A", { cwd: repoDir });
+        await execAsync('git config user.email "agent@test.com"', {
+          cwd: repoDir,
+        });
+        await execAsync('git config user.name "Agent"', { cwd: repoDir });
+        await execAsync('git commit -m "RALPH: agent commit"', {
+          cwd: repoDir,
+        });
+        return "Done with iteration.";
+      }),
+    );
 
     const result = await Effect.runPromise(
       orchestrate({
@@ -149,7 +182,7 @@ describe("Orchestrator", () => {
         iterations: 1,
         repoFullName: "test/repo",
         prompt: "do some work",
-      }).pipe(Effect.provide(wrapAsFactory(layer))),
+      }).pipe(Effect.provide(factoryLayer)),
     );
 
     expect(result.iterationsRun).toBe(1);
@@ -162,16 +195,16 @@ describe("Orchestrator", () => {
 
   it("stops early on completion signal", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-host-"));
-    const sandboxDir = await mkdtemp(join(tmpdir(), "orch-sandbox-"));
-    const sandboxRepoDir = join(sandboxDir, "repo");
 
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
     // Mock agent: emits completion signal
-    const layer = makeMockAgentLayer(sandboxDir, async () => {
-      return "All done. <promise>COMPLETE</promise>";
-    });
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) =>
+      makeMockAgentLayer(dir, async () => {
+        return "All done. <promise>COMPLETE</promise>";
+      }),
+    );
 
     const result = await Effect.runPromise(
       orchestrate({
@@ -180,7 +213,7 @@ describe("Orchestrator", () => {
         iterations: 5,
         repoFullName: "test/repo",
         prompt: "do some work",
-      }).pipe(Effect.provide(wrapAsFactory(layer))),
+      }).pipe(Effect.provide(factoryLayer)),
     );
 
     expect(result.iterationsRun).toBe(1);
@@ -189,8 +222,6 @@ describe("Orchestrator", () => {
 
   it("runs multiple iterations with re-sync between them", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-host-"));
-    const sandboxDir = await mkdtemp(join(tmpdir(), "orch-sandbox-"));
-    const sandboxRepoDir = join(sandboxDir, "repo");
 
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
@@ -198,24 +229,26 @@ describe("Orchestrator", () => {
     let iterationCount = 0;
 
     // Mock agent: creates a commit each iteration, completes on iteration 3
-    const layer = makeMockAgentLayer(sandboxDir, async (repoDir) => {
-      iterationCount++;
-      const filename = `iter-${iterationCount}.txt`;
-      await writeFile(join(repoDir, filename), `iteration ${iterationCount}`);
-      await execAsync("git add -A", { cwd: repoDir });
-      await execAsync('git config user.email "agent@test.com"', {
-        cwd: repoDir,
-      });
-      await execAsync('git config user.name "Agent"', { cwd: repoDir });
-      await execAsync(`git commit -m "RALPH: iteration ${iterationCount}"`, {
-        cwd: repoDir,
-      });
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) =>
+      makeMockAgentLayer(dir, async (repoDir) => {
+        iterationCount++;
+        const filename = `iter-${iterationCount}.txt`;
+        await writeFile(join(repoDir, filename), `iteration ${iterationCount}`);
+        await execAsync("git add -A", { cwd: repoDir });
+        await execAsync('git config user.email "agent@test.com"', {
+          cwd: repoDir,
+        });
+        await execAsync('git config user.name "Agent"', { cwd: repoDir });
+        await execAsync(`git commit -m "RALPH: iteration ${iterationCount}"`, {
+          cwd: repoDir,
+        });
 
-      if (iterationCount === 3) {
-        return "All tasks done. <promise>COMPLETE</promise>";
-      }
-      return `Finished iteration ${iterationCount}.`;
-    });
+        if (iterationCount === 3) {
+          return "All tasks done. <promise>COMPLETE</promise>";
+        }
+        return `Finished iteration ${iterationCount}.`;
+      }),
+    );
 
     const result = await Effect.runPromise(
       orchestrate({
@@ -224,7 +257,7 @@ describe("Orchestrator", () => {
         iterations: 5,
         repoFullName: "test/repo",
         prompt: "do some work",
-      }).pipe(Effect.provide(wrapAsFactory(layer))),
+      }).pipe(Effect.provide(factoryLayer)),
     );
 
     expect(result.iterationsRun).toBe(3);
@@ -239,16 +272,16 @@ describe("Orchestrator", () => {
 
   it("handles iteration with no agent commits gracefully", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-host-"));
-    const sandboxDir = await mkdtemp(join(tmpdir(), "orch-sandbox-"));
-    const sandboxRepoDir = join(sandboxDir, "repo");
 
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
     // Mock agent: doesn't make any commits
-    const layer = makeMockAgentLayer(sandboxDir, async () => {
-      return "Nothing to do.";
-    });
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) =>
+      makeMockAgentLayer(dir, async () => {
+        return "Nothing to do.";
+      }),
+    );
 
     const result = await Effect.runPromise(
       orchestrate({
@@ -257,7 +290,7 @@ describe("Orchestrator", () => {
         iterations: 2,
         repoFullName: "test/repo",
         prompt: "do some work",
-      }).pipe(Effect.provide(wrapAsFactory(layer))),
+      }).pipe(Effect.provide(factoryLayer)),
     );
 
     expect(result.iterationsRun).toBe(2);
@@ -267,6 +300,45 @@ describe("Orchestrator", () => {
     const hostHead = await getHead(hostDir);
     const { stdout } = await execAsync("git log --oneline", { cwd: hostDir });
     expect(stdout.trim().split("\n")).toHaveLength(1);
+  });
+
+  it("each iteration gets an isolated sandbox (no state leaks)", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-iso-host-"));
+
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    let iteration = 0;
+    let markerExistedInIter2 = true;
+
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) =>
+      makeMockAgentLayer(dir, async (repoDir) => {
+        iteration++;
+        if (iteration === 1) {
+          // Create an untracked marker file — should NOT leak to iteration 2
+          await writeFile(join(repoDir, ".sandbox-marker"), "iter1");
+          return "Done iter 1";
+        }
+        // Iteration 2: check if marker leaked from iteration 1
+        markerExistedInIter2 = existsSync(join(repoDir, ".sandbox-marker"));
+        return "Done iter 2. <promise>COMPLETE</promise>";
+      }),
+    );
+
+    const result = await Effect.runPromise(
+      orchestrate({
+        hostRepoDir: hostDir,
+        sandboxRepoDir,
+        iterations: 3,
+        repoFullName: "test/repo",
+        prompt: "test isolation",
+      }).pipe(Effect.provide(factoryLayer)),
+    );
+
+    expect(result.iterationsRun).toBe(2);
+    expect(result.complete).toBe(true);
+    // Untracked file from iteration 1 must not exist in iteration 2's sandbox
+    expect(markerExistedInIter2).toBe(false);
   });
 });
 
@@ -341,40 +413,39 @@ describe("parseStreamJsonLine", () => {
 describe("Orchestrator error handling", () => {
   it("propagates SandboxError when agent exits with non-zero code", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-err-host-"));
-    const sandboxDir = await mkdtemp(join(tmpdir(), "orch-err-sandbox-"));
-    const sandboxRepoDir = join(sandboxDir, "repo");
 
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
-    const fsLayer = FilesystemSandbox.layer(sandboxDir);
-
     // Layer where agent invocation returns non-zero exit code
-    const layer = Layer.succeed(Sandbox, {
-      exec: (command, options) =>
-        Effect.flatMap(Sandbox, (real) => real.exec(command, options)).pipe(
-          Effect.provide(fsLayer),
-        ),
-      execStreaming: (command, onStdoutLine, options) => {
-        if (command.startsWith("claude ")) {
-          return Effect.succeed({
-            stdout: "",
-            stderr: "Agent crashed",
-            exitCode: 1,
-          });
-        }
-        return Effect.flatMap(Sandbox, (real) =>
-          real.execStreaming(command, onStdoutLine, options),
-        ).pipe(Effect.provide(fsLayer));
-      },
-      copyIn: (hostPath, sandboxPath) =>
-        Effect.flatMap(Sandbox, (real) =>
-          real.copyIn(hostPath, sandboxPath),
-        ).pipe(Effect.provide(fsLayer)),
-      copyOut: (sandboxPath, hostPath) =>
-        Effect.flatMap(Sandbox, (real) =>
-          real.copyOut(sandboxPath, hostPath),
-        ).pipe(Effect.provide(fsLayer)),
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) => {
+      const fsLayer = FilesystemSandbox.layer(dir);
+      return Layer.succeed(Sandbox, {
+        exec: (command, options) =>
+          Effect.flatMap(Sandbox, (real) => real.exec(command, options)).pipe(
+            Effect.provide(fsLayer),
+          ),
+        execStreaming: (command, onStdoutLine, options) => {
+          if (command.startsWith("claude ")) {
+            return Effect.succeed({
+              stdout: "",
+              stderr: "Agent crashed",
+              exitCode: 1,
+            });
+          }
+          return Effect.flatMap(Sandbox, (real) =>
+            real.execStreaming(command, onStdoutLine, options),
+          ).pipe(Effect.provide(fsLayer));
+        },
+        copyIn: (hostPath, sandboxPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyIn(hostPath, sandboxPath),
+          ).pipe(Effect.provide(fsLayer)),
+        copyOut: (sandboxPath, hostPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyOut(sandboxPath, hostPath),
+          ).pipe(Effect.provide(fsLayer)),
+      });
     });
 
     const exit = await Effect.runPromiseExit(
@@ -384,7 +455,7 @@ describe("Orchestrator error handling", () => {
         iterations: 1,
         repoFullName: "test/repo",
         prompt: "do some work",
-      }).pipe(Effect.provide(wrapAsFactory(layer))),
+      }).pipe(Effect.provide(factoryLayer)),
     );
 
     expect(exit._tag).toBe("Failure");
@@ -392,47 +463,46 @@ describe("Orchestrator error handling", () => {
 
   it("falls back to stdout when stream has no result line", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-fallback-host-"));
-    const sandboxDir = await mkdtemp(join(tmpdir(), "orch-fallback-sandbox-"));
-    const sandboxRepoDir = join(sandboxDir, "repo");
 
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
-    const fsLayer = FilesystemSandbox.layer(sandboxDir);
-
     // Layer where agent stream emits only assistant lines, no result line.
     // stdout contains the completion signal so the fallback path picks it up.
-    const layer = Layer.succeed(Sandbox, {
-      exec: (command, options) =>
-        Effect.flatMap(Sandbox, (real) => real.exec(command, options)).pipe(
-          Effect.provide(fsLayer),
-        ),
-      execStreaming: (command, onStdoutLine, options) => {
-        if (command.startsWith("claude ")) {
-          // Only emit an assistant line, no result line
-          const assistantLine = JSON.stringify({
-            type: "assistant",
-            message: { content: [{ type: "text", text: "working..." }] },
-          });
-          onStdoutLine(assistantLine);
-          return Effect.succeed({
-            stdout: "All done. <promise>COMPLETE</promise>",
-            stderr: "",
-            exitCode: 0,
-          });
-        }
-        return Effect.flatMap(Sandbox, (real) =>
-          real.execStreaming(command, onStdoutLine, options),
-        ).pipe(Effect.provide(fsLayer));
-      },
-      copyIn: (hostPath, sandboxPath) =>
-        Effect.flatMap(Sandbox, (real) =>
-          real.copyIn(hostPath, sandboxPath),
-        ).pipe(Effect.provide(fsLayer)),
-      copyOut: (sandboxPath, hostPath) =>
-        Effect.flatMap(Sandbox, (real) =>
-          real.copyOut(sandboxPath, hostPath),
-        ).pipe(Effect.provide(fsLayer)),
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) => {
+      const fsLayer = FilesystemSandbox.layer(dir);
+      return Layer.succeed(Sandbox, {
+        exec: (command, options) =>
+          Effect.flatMap(Sandbox, (real) => real.exec(command, options)).pipe(
+            Effect.provide(fsLayer),
+          ),
+        execStreaming: (command, onStdoutLine, options) => {
+          if (command.startsWith("claude ")) {
+            // Only emit an assistant line, no result line
+            const assistantLine = JSON.stringify({
+              type: "assistant",
+              message: { content: [{ type: "text", text: "working..." }] },
+            });
+            onStdoutLine(assistantLine);
+            return Effect.succeed({
+              stdout: "All done. <promise>COMPLETE</promise>",
+              stderr: "",
+              exitCode: 0,
+            });
+          }
+          return Effect.flatMap(Sandbox, (real) =>
+            real.execStreaming(command, onStdoutLine, options),
+          ).pipe(Effect.provide(fsLayer));
+        },
+        copyIn: (hostPath, sandboxPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyIn(hostPath, sandboxPath),
+          ).pipe(Effect.provide(fsLayer)),
+        copyOut: (sandboxPath, hostPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyOut(sandboxPath, hostPath),
+          ).pipe(Effect.provide(fsLayer)),
+      });
     });
 
     const result = await Effect.runPromise(
@@ -442,7 +512,7 @@ describe("Orchestrator error handling", () => {
         iterations: 5,
         repoFullName: "test/repo",
         prompt: "do some work",
-      }).pipe(Effect.provide(wrapAsFactory(layer))),
+      }).pipe(Effect.provide(factoryLayer)),
     );
 
     // Should detect COMPLETE from the stdout fallback
@@ -452,65 +522,66 @@ describe("Orchestrator error handling", () => {
 
   it("preserves iteration 1 work when agent fails on iteration 2", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-partial-host-"));
-    const sandboxDir = await mkdtemp(join(tmpdir(), "orch-partial-sandbox-"));
-    const sandboxRepoDir = join(sandboxDir, "repo");
 
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
     let callCount = 0;
 
-    const fsLayer = FilesystemSandbox.layer(sandboxDir);
-
     // Layer: iteration 1 succeeds with a commit, iteration 2 agent crashes
-    const layer = Layer.succeed(Sandbox, {
-      exec: (command, options) =>
-        Effect.flatMap(Sandbox, (real) => real.exec(command, options)).pipe(
-          Effect.provide(fsLayer),
-        ),
-      execStreaming: (command, onStdoutLine, options) => {
-        if (command.startsWith("claude ")) {
-          callCount++;
-          if (callCount === 1) {
-            // Iteration 1: make a commit
-            return Effect.gen(function* () {
-              const cwd = options?.cwd ?? sandboxDir;
-              yield* Effect.promise(async () => {
-                await writeFile(join(cwd, "iter1.txt"), "iteration 1 data");
-                await execAsync("git add -A", { cwd });
-                await execAsync('git config user.email "agent@test.com"', {
-                  cwd,
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) => {
+      const fsLayer = FilesystemSandbox.layer(dir);
+      return Layer.succeed(Sandbox, {
+        exec: (command, options) =>
+          Effect.flatMap(Sandbox, (real) => real.exec(command, options)).pipe(
+            Effect.provide(fsLayer),
+          ),
+        execStreaming: (command, onStdoutLine, options) => {
+          if (command.startsWith("claude ")) {
+            callCount++;
+            if (callCount === 1) {
+              // Iteration 1: make a commit
+              return Effect.gen(function* () {
+                const cwd = options?.cwd ?? dir;
+                yield* Effect.promise(async () => {
+                  await writeFile(join(cwd, "iter1.txt"), "iteration 1 data");
+                  await execAsync("git add -A", { cwd });
+                  await execAsync('git config user.email "agent@test.com"', {
+                    cwd,
+                  });
+                  await execAsync('git config user.name "Agent"', { cwd });
+                  await execAsync('git commit -m "RALPH: iteration 1"', {
+                    cwd,
+                  });
                 });
-                await execAsync('git config user.name "Agent"', { cwd });
-                await execAsync('git commit -m "RALPH: iteration 1"', { cwd });
+                const output = "Finished iteration 1.";
+                const streamOutput = toStreamJson(output);
+                for (const line of streamOutput.split("\n")) {
+                  onStdoutLine(line);
+                }
+                return { stdout: streamOutput, stderr: "", exitCode: 0 };
               });
-              const output = "Finished iteration 1.";
-              const streamOutput = toStreamJson(output);
-              for (const line of streamOutput.split("\n")) {
-                onStdoutLine(line);
-              }
-              return { stdout: streamOutput, stderr: "", exitCode: 0 };
+            }
+            // Iteration 2: agent crashes
+            return Effect.succeed({
+              stdout: "",
+              stderr: "Agent segfault",
+              exitCode: 1,
             });
           }
-          // Iteration 2: agent crashes
-          return Effect.succeed({
-            stdout: "",
-            stderr: "Agent segfault",
-            exitCode: 1,
-          });
-        }
-        return Effect.flatMap(Sandbox, (real) =>
-          real.execStreaming(command, onStdoutLine, options),
-        ).pipe(Effect.provide(fsLayer));
-      },
-      copyIn: (hostPath, sandboxPath) =>
-        Effect.flatMap(Sandbox, (real) =>
-          real.copyIn(hostPath, sandboxPath),
-        ).pipe(Effect.provide(fsLayer)),
-      copyOut: (sandboxPath, hostPath) =>
-        Effect.flatMap(Sandbox, (real) =>
-          real.copyOut(sandboxPath, hostPath),
-        ).pipe(Effect.provide(fsLayer)),
+          return Effect.flatMap(Sandbox, (real) =>
+            real.execStreaming(command, onStdoutLine, options),
+          ).pipe(Effect.provide(fsLayer));
+        },
+        copyIn: (hostPath, sandboxPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyIn(hostPath, sandboxPath),
+          ).pipe(Effect.provide(fsLayer)),
+        copyOut: (sandboxPath, hostPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyOut(sandboxPath, hostPath),
+          ).pipe(Effect.provide(fsLayer)),
+      });
     });
 
     const exit = await Effect.runPromiseExit(
@@ -520,7 +591,7 @@ describe("Orchestrator error handling", () => {
         iterations: 3,
         repoFullName: "test/repo",
         prompt: "do some work",
-      }).pipe(Effect.provide(wrapAsFactory(layer))),
+      }).pipe(Effect.provide(factoryLayer)),
     );
 
     // Should have failed on iteration 2
@@ -532,10 +603,9 @@ describe("Orchestrator error handling", () => {
   });
 
   it("propagates error when syncIn fails (invalid host repo)", async () => {
-    const sandboxDir = await mkdtemp(join(tmpdir(), "orch-err-sandbox-"));
-    const sandboxRepoDir = join(sandboxDir, "repo");
-
-    const layer = makeMockAgentLayer(sandboxDir, async () => "done");
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) =>
+      makeMockAgentLayer(dir, async () => "done"),
+    );
 
     const exit = await Effect.runPromiseExit(
       orchestrate({
@@ -544,7 +614,7 @@ describe("Orchestrator error handling", () => {
         iterations: 1,
         repoFullName: "test/repo",
         prompt: "do some work",
-      }).pipe(Effect.provide(wrapAsFactory(layer))),
+      }).pipe(Effect.provide(factoryLayer)),
     );
 
     expect(exit._tag).toBe("Failure");
@@ -552,50 +622,50 @@ describe("Orchestrator error handling", () => {
 
   it("propagates error when getSandboxHead fails (empty repo)", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-nohead-host-"));
-    const sandboxDir = await mkdtemp(join(tmpdir(), "orch-nohead-sandbox-"));
-    const sandboxRepoDir = join(sandboxDir, "repo");
 
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
-    const fsLayer = FilesystemSandbox.layer(sandboxDir);
-
     // Layer that makes syncIn succeed but sabotages HEAD resolution
     // by making git rev-parse HEAD fail in sandbox after sync
     let syncDone = false;
-    const layer = Layer.succeed(Sandbox, {
-      exec: (command, options) => {
-        // After syncIn, make git rev-parse HEAD fail
-        if (syncDone && command === "git rev-parse HEAD") {
-          return Effect.succeed({
-            stdout: "",
-            stderr: "fatal: ambiguous argument 'HEAD'",
-            exitCode: 128,
-          });
-        }
-        return Effect.flatMap(Sandbox, (real) =>
-          real.exec(command, options),
-        ).pipe(Effect.provide(fsLayer));
-      },
-      execStreaming: (command, onStdoutLine, options) => {
-        if (command.includes("git rev-parse HEAD")) {
+
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) => {
+      const fsLayer = FilesystemSandbox.layer(dir);
+      return Layer.succeed(Sandbox, {
+        exec: (command, options) => {
+          // After syncIn, make git rev-parse HEAD fail
+          if (syncDone && command === "git rev-parse HEAD") {
+            return Effect.succeed({
+              stdout: "",
+              stderr: "fatal: ambiguous argument 'HEAD'",
+              exitCode: 128,
+            });
+          }
+          return Effect.flatMap(Sandbox, (real) =>
+            real.exec(command, options),
+          ).pipe(Effect.provide(fsLayer));
+        },
+        execStreaming: (command, onStdoutLine, options) => {
+          if (command.includes("git rev-parse HEAD")) {
+            syncDone = true;
+          }
+          return Effect.flatMap(Sandbox, (real) =>
+            real.execStreaming(command, onStdoutLine, options),
+          ).pipe(Effect.provide(fsLayer));
+        },
+        copyIn: (hostPath, sandboxPath) => {
+          // Mark sync as done after copyIn (which happens during syncIn)
           syncDone = true;
-        }
-        return Effect.flatMap(Sandbox, (real) =>
-          real.execStreaming(command, onStdoutLine, options),
-        ).pipe(Effect.provide(fsLayer));
-      },
-      copyIn: (hostPath, sandboxPath) => {
-        // Mark sync as done after copyIn (which happens during syncIn)
-        syncDone = true;
-        return Effect.flatMap(Sandbox, (real) =>
-          real.copyIn(hostPath, sandboxPath),
-        ).pipe(Effect.provide(fsLayer));
-      },
-      copyOut: (sandboxPath, hostPath) =>
-        Effect.flatMap(Sandbox, (real) =>
-          real.copyOut(sandboxPath, hostPath),
-        ).pipe(Effect.provide(fsLayer)),
+          return Effect.flatMap(Sandbox, (real) =>
+            real.copyIn(hostPath, sandboxPath),
+          ).pipe(Effect.provide(fsLayer));
+        },
+        copyOut: (sandboxPath, hostPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyOut(sandboxPath, hostPath),
+          ).pipe(Effect.provide(fsLayer)),
+      });
     });
 
     const exit = await Effect.runPromiseExit(
@@ -605,7 +675,7 @@ describe("Orchestrator error handling", () => {
         iterations: 1,
         repoFullName: "test/repo",
         prompt: "do some work",
-      }).pipe(Effect.provide(wrapAsFactory(layer))),
+      }).pipe(Effect.provide(factoryLayer)),
     );
 
     expect(exit._tag).toBe("Failure");
@@ -615,46 +685,46 @@ describe("Orchestrator error handling", () => {
 describe("Orchestrator streaming", () => {
   it("invokes claude with stream-json and verbose flags", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-stream-host-"));
-    const sandboxDir = await mkdtemp(join(tmpdir(), "orch-stream-sandbox-"));
-    const sandboxRepoDir = join(sandboxDir, "repo");
 
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
     let capturedCommand = "";
 
-    const fsLayer = FilesystemSandbox.layer(sandboxDir);
-    const layer = Layer.succeed(Sandbox, {
-      exec: (command, options) =>
-        Effect.flatMap(Sandbox, (real) => real.exec(command, options)).pipe(
-          Effect.provide(fsLayer),
-        ),
-      execStreaming: (command, onStdoutLine, options) => {
-        if (command.startsWith("claude ")) {
-          capturedCommand = command;
-          const output = "Test output";
-          const streamOutput = toStreamJson(output);
-          for (const line of streamOutput.split("\n")) {
-            onStdoutLine(line);
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) => {
+      const fsLayer = FilesystemSandbox.layer(dir);
+      return Layer.succeed(Sandbox, {
+        exec: (command, options) =>
+          Effect.flatMap(Sandbox, (real) => real.exec(command, options)).pipe(
+            Effect.provide(fsLayer),
+          ),
+        execStreaming: (command, onStdoutLine, options) => {
+          if (command.startsWith("claude ")) {
+            capturedCommand = command;
+            const output = "Test output";
+            const streamOutput = toStreamJson(output);
+            for (const line of streamOutput.split("\n")) {
+              onStdoutLine(line);
+            }
+            return Effect.succeed({
+              stdout: streamOutput,
+              stderr: "",
+              exitCode: 0,
+            });
           }
-          return Effect.succeed({
-            stdout: streamOutput,
-            stderr: "",
-            exitCode: 0,
-          });
-        }
-        return Effect.flatMap(Sandbox, (real) =>
-          real.execStreaming(command, onStdoutLine, options),
-        ).pipe(Effect.provide(fsLayer));
-      },
-      copyIn: (hostPath, sandboxPath) =>
-        Effect.flatMap(Sandbox, (real) =>
-          real.copyIn(hostPath, sandboxPath),
-        ).pipe(Effect.provide(fsLayer)),
-      copyOut: (sandboxPath, hostPath) =>
-        Effect.flatMap(Sandbox, (real) =>
-          real.copyOut(sandboxPath, hostPath),
-        ).pipe(Effect.provide(fsLayer)),
+          return Effect.flatMap(Sandbox, (real) =>
+            real.execStreaming(command, onStdoutLine, options),
+          ).pipe(Effect.provide(fsLayer));
+        },
+        copyIn: (hostPath, sandboxPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyIn(hostPath, sandboxPath),
+          ).pipe(Effect.provide(fsLayer)),
+        copyOut: (sandboxPath, hostPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyOut(sandboxPath, hostPath),
+          ).pipe(Effect.provide(fsLayer)),
+      });
     });
 
     await Effect.runPromise(
@@ -664,7 +734,7 @@ describe("Orchestrator streaming", () => {
         iterations: 1,
         repoFullName: "test/repo",
         prompt: "do some work",
-      }).pipe(Effect.provide(wrapAsFactory(layer))),
+      }).pipe(Effect.provide(factoryLayer)),
     );
 
     expect(capturedCommand).toContain("--output-format stream-json");
@@ -674,16 +744,16 @@ describe("Orchestrator streaming", () => {
 
   it("extracts completion signal from stream-json result line", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-result-host-"));
-    const sandboxDir = await mkdtemp(join(tmpdir(), "orch-result-sandbox-"));
-    const sandboxRepoDir = join(sandboxDir, "repo");
 
     await initRepo(hostDir);
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
     // Mock agent that emits completion via stream-json result type
-    const layer = makeMockAgentLayer(sandboxDir, async () => {
-      return "All done. <promise>COMPLETE</promise>";
-    });
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) =>
+      makeMockAgentLayer(dir, async () => {
+        return "All done. <promise>COMPLETE</promise>";
+      }),
+    );
 
     const result = await Effect.runPromise(
       orchestrate({
@@ -692,7 +762,7 @@ describe("Orchestrator streaming", () => {
         iterations: 5,
         repoFullName: "test/repo",
         prompt: "do some work",
-      }).pipe(Effect.provide(wrapAsFactory(layer))),
+      }).pipe(Effect.provide(factoryLayer)),
     );
 
     expect(result.iterationsRun).toBe(1);
