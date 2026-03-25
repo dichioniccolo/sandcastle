@@ -168,7 +168,7 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
   // When no branch is provided, generate a temporary branch name.
   // This names the log file after the temp branch and also directs
   // the sandbox to work on that branch (instead of the current host branch).
-  const resolvedBranch = branch ?? generateTempBranchName();
+  const resolvedBranch = branch ?? generateTempBranchName(agentName);
 
   // When using a temp branch, prefix the log filename with the target branch
   // (the host's current branch) so developers can tell which branch was targeted.
@@ -192,7 +192,7 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
       ? (() => {
           printFileDisplayStartup({
             logPath: resolvedLogging.path,
-            agentName: options.name,
+            agentName,
             branch: resolvedBranch,
           });
           return Layer.provide(
@@ -213,6 +213,7 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
         // and SandboxLifecycle cherry-picks commits onto the host's current branch
         branch,
         copyToSandbox: options.copyToSandbox,
+        agentName,
       }),
       NodeFileSystem.layer,
     ),
@@ -225,6 +226,7 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
       const d = yield* Display;
       yield* d.intro(options.name ?? "sandcastle");
       const rows: Record<string, string> = {
+        Agent: agentName,
         Image: resolvedImageName,
         "Max iterations": String(maxIterations),
       };

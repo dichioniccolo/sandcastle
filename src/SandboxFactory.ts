@@ -266,6 +266,8 @@ export class WorktreeSandboxConfig extends Context.Tag("WorktreeSandboxConfig")<
     readonly branch?: string;
     /** Paths relative to the host repo root to copy into the worktree before container start. */
     readonly copyToSandbox?: string[];
+    /** When specified, the agent name is included in the auto-generated branch and worktree names. */
+    readonly agentName?: string;
   }
 >() {}
 
@@ -302,6 +304,7 @@ export const WorktreeDockerSandboxFactory = {
         hostRepoDir,
         branch,
         copyToSandbox: copyPaths,
+        agentName,
       } = yield* WorktreeSandboxConfig;
       const fileSystem = yield* FileSystem.FileSystem;
       return {
@@ -331,7 +334,7 @@ export const WorktreeDockerSandboxFactory = {
                 Effect.andThen(
                   branch
                     ? WorktreeManager.create(hostRepoDir, { branch })
-                    : WorktreeManager.create(hostRepoDir),
+                    : WorktreeManager.create(hostRepoDir, { agentName }),
                 ),
               )
               .pipe(Effect.provideService(FileSystem.FileSystem, fileSystem))
