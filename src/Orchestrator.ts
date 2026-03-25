@@ -141,7 +141,7 @@ const formatUsageRows = (
   return rows;
 };
 
-const COMPLETION_SIGNAL = "<promise>COMPLETE</promise>";
+const DEFAULT_COMPLETION_SIGNAL = "<promise>COMPLETE</promise>";
 
 export interface OrchestrateOptions {
   readonly hostRepoDir: string;
@@ -151,6 +151,7 @@ export interface OrchestrateOptions {
   readonly prompt: string;
   readonly branch?: string;
   readonly model?: string;
+  readonly completionSignal?: string;
 }
 
 export interface OrchestrateResult {
@@ -170,6 +171,8 @@ export const orchestrate = (
     const { hostRepoDir, sandboxRepoDir, iterations, config, prompt, branch } =
       options;
     const resolvedModel = options.model ?? DEFAULT_MODEL;
+    const completionSignal =
+      options.completionSignal ?? DEFAULT_COMPLETION_SIGNAL;
 
     const allCommits: { sha: string }[] = [];
     let allStdout = "";
@@ -214,7 +217,7 @@ export const orchestrate = (
               }
 
               // Check completion signal
-              if (agentOutput.includes(COMPLETION_SIGNAL)) {
+              if (agentOutput.includes(completionSignal)) {
                 return {
                   wasCompletionSignalDetected: true,
                   stdout: agentOutput,

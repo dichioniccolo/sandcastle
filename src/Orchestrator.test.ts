@@ -226,6 +226,61 @@ describe("Orchestrator", () => {
     expect(result.wasCompletionSignalDetected).toBe(true);
   });
 
+  it("stops early on custom completion signal", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-host-"));
+
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    // Mock agent: emits a custom completion signal
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) =>
+      makeMockAgentLayer(dir, async () => {
+        return "All done. TASK_FINISHED";
+      }),
+    );
+
+    const result = await Effect.runPromise(
+      orchestrate({
+        hostRepoDir: hostDir,
+        sandboxRepoDir,
+        iterations: 5,
+        prompt: "do some work",
+        completionSignal: "TASK_FINISHED",
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+    );
+
+    expect(result.iterationsRun).toBe(1);
+    expect(result.wasCompletionSignalDetected).toBe(true);
+  });
+
+  it("does not trigger default completion signal when custom one is set", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-host-"));
+
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    // Mock agent: emits the default completion signal but custom one is set
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory((dir) =>
+      makeMockAgentLayer(dir, async () => {
+        return "All done. <promise>COMPLETE</promise>";
+      }),
+    );
+
+    const result = await Effect.runPromise(
+      orchestrate({
+        hostRepoDir: hostDir,
+        sandboxRepoDir,
+        iterations: 2,
+        prompt: "do some work",
+        completionSignal: "TASK_FINISHED",
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+    );
+
+    // Custom signal not in output, so all iterations run
+    expect(result.iterationsRun).toBe(2);
+    expect(result.wasCompletionSignalDetected).toBe(false);
+  });
+
   it("runs multiple iterations with re-sync between them", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "orch-host-"));
 

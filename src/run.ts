@@ -41,6 +41,8 @@ export interface RunOptions {
   readonly promptArgs?: PromptArgs;
   /** Logging mode (default: { type: 'file' } with auto-generated path under .sandcastle/logs/) */
   readonly logging?: LoggingOption;
+  /** Custom completion signal string (default: "<promise>COMPLETE</promise>") */
+  readonly completionSignal?: string;
 }
 
 export interface RunResult {
@@ -145,6 +147,7 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
         prompt: resolvedPrompt,
         branch,
         model: resolvedModel,
+        completionSignal: options.completionSignal,
       });
     }).pipe(Effect.provide(runLayer)),
   );

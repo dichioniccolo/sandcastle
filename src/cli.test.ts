@@ -50,6 +50,11 @@ describe("sandcastle CLI", () => {
     expect(stdout).toContain("--prompt-arg");
   });
 
+  it("run --help shows --completion-signal flag", async () => {
+    const { stdout } = await runCli("run --help", process.cwd());
+    expect(stdout).toContain("--completion-signal");
+  });
+
   it("run command errors when .sandcastle/ is missing", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "cli-host-"));
     await initRepo(hostDir);

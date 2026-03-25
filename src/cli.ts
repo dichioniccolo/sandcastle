@@ -209,6 +209,13 @@ const promptArgOption = Options.keyValueMap("prompt-arg").pipe(
   Options.optional,
 );
 
+const completionSignalOption = Options.text("completion-signal").pipe(
+  Options.withDescription(
+    'Custom string to detect task completion (default: "<promise>COMPLETE</promise>")',
+  ),
+  Options.optional,
+);
+
 const runCommand = Command.make(
   "run",
   {
@@ -220,6 +227,7 @@ const runCommand = Command.make(
     model: modelOption,
     agent: agentOption,
     promptArgs: promptArgOption,
+    completionSignal: completionSignalOption,
   },
   ({
     iterations,
@@ -230,6 +238,7 @@ const runCommand = Command.make(
     model,
     agent,
     promptArgs,
+    completionSignal,
   }) =>
     Effect.gen(function* () {
       const d = yield* Display;
@@ -259,6 +268,9 @@ const runCommand = Command.make(
             )
           : undefined;
 
+      const resolvedCompletionSignal =
+        completionSignal._tag === "Some" ? completionSignal.value : undefined;
+
       const result = yield* Effect.tryPromise({
         try: () =>
           run({
@@ -274,6 +286,7 @@ const runCommand = Command.make(
             imageName: resolvedImageName,
             promptArgs: resolvedPromptArgs,
             logging: { type: "stdout" },
+            completionSignal: resolvedCompletionSignal,
           }),
         catch: (e) =>
           new AgentError({
