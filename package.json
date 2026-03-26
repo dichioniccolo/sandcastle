@@ -12,7 +12,7 @@
     }
   },
   "bin": {
-    "sandcastle": "./dist/main.js"
+    "sandcastle": "dist/main.js"
   },
   "scripts": {
     "build": "tsgo --project tsconfig.build.json",
