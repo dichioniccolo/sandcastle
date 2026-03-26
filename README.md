@@ -1,18 +1,16 @@
 # Sandcastle
 
-A TypeScript CLI for orchestrating AI coding agents in isolated Docker containers. Sandcastle handles the hard parts — syncing your repo into a container, invoking the agent, and extracting commits back — so you can run agents unattended against your project's open GitHub issues.
+A TypeScript CLI for orchestrating AI coding agents in isolated Docker containers. Sandcastle handles the hard parts — building worktrees, invoking the agent, and merging commits back — so you can run AFK agents with a single `run()`.
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) v22+
-- [Docker](https://www.docker.com/)
+- [Docker Desktop](https://www.docker.com/)
 - [Git](https://git-scm.com/)
-- [GitHub CLI](https://cli.github.com/) (`gh`) — authenticated with repo access
 
 ## Installation
 
 ```bash
-npm install -g @ai-hero/sandcastle
+pnpm add @ai-hero/sandcastle
 ```
 
 ## Quick start
@@ -20,7 +18,7 @@ npm install -g @ai-hero/sandcastle
 ```bash
 # 1. Initialize — scaffolds .sandcastle/ config directory and builds the Docker image
 cd /path/to/your/repo
-sandcastle init
+npx sandcastle init
 
 # 2. Set up environment variables in .sandcastle/.env
 cp .sandcastle/.env.example .sandcastle/.env
@@ -33,15 +31,11 @@ import { run } from "@ai-hero/sandcastle";
 
 await run({
   promptFile: ".sandcastle/prompt.md",
-  maxIterations: 5,
 });
 ```
 
 ```bash
 npx tsx main.ts
-
-# 4. Clean up when you're done
-sandcastle remove-image
 ```
 
 ## CLI commands
@@ -125,7 +119,7 @@ Commands run **inside the sandbox** after sync-in and `onSandboxReady` hooks, so
 !`git log --oneline -10`
 ```
 
-If any command exits with a non-zero code, the run fails immediately with an error — broken context is surfaced early rather than silently producing a bad prompt.
+If any command exits with a non-zero code, the run fails immediately with an error.
 
 ### Prompt arguments with `{{KEY}}`
 
