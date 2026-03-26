@@ -154,38 +154,18 @@ When the agent outputs `<promise>COMPLETE</promise>`, the orchestrator stops the
 
 This is useful for task-based workflows where the agent should stop once it has finished, rather than running all remaining iterations.
 
-### Example prompt: GitHub Issue Backlog
+### Templates
 
-This is a complete, copy-pasteable prompt for an agent that works through a repo's open GitHub issues:
+`sandcastle init` prompts you to choose a template, which scaffolds a ready-to-use prompt and `main.ts` suited to a specific workflow. Four templates are available:
 
-```markdown
-# Issues
+| Template              | Description                                                             |
+| --------------------- | ----------------------------------------------------------------------- |
+| `blank`               | Bare scaffold — write your own prompt and orchestration                 |
+| `simple-loop`         | Picks GitHub issues one by one and closes them                          |
+| `sequential-reviewer` | Implements issues one by one, with a code review step after each        |
+| `parallel-planner`    | Plans parallelizable issues, executes on separate branches, then merges |
 
-!`gh issue list --state open --json number,title,body,comments,labels --limit 20`
-
-# Recent work
-
-!`git log --oneline -10`
-
-# Task
-
-Pick the highest-priority open issue and work on it. Follow this process:
-
-1. Explore the codebase to understand the relevant code
-2. Write a failing test for the expected behavior
-3. Implement the fix or feature to make the test pass
-4. Refactor if needed
-5. Commit your changes with a descriptive message
-
-When the task is complete, close the GitHub issue with `gh issue close <number>`
-and output <promise>COMPLETE</promise> to signal you are done.
-
-If the task is not complete, leave a comment on the issue describing progress.
-
-Only work on a single issue per run.
-```
-
-Save this as `.sandcastle/prompt.md` and invoke it via the JS API (see [Node API](#node-api) below).
+Select a template during `sandcastle init` when prompted, or re-run init in a fresh repo to try a different one.
 
 ## Node API
 
