@@ -3,7 +3,6 @@ import path, { join } from "node:path";
 import { styleText } from "node:util";
 import { Effect, Layer } from "effect";
 import { getAgentProvider } from "./AgentProvider.js";
-import { readConfig } from "./Config.js";
 import {
   ClackDisplay,
   Display,
@@ -168,24 +167,15 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
     ),
   );
 
-  // Read config
-  const config = await Effect.runPromise(
-    readConfig(hostRepoDir).pipe(Effect.provide(NodeContext.layer)),
-  );
+  // Resolve model: explicit option > default
+  const resolvedModel = model;
 
-  // Merge hooks: explicit hooks override config hooks
-  const resolvedConfig = hooks ? { ...config, hooks } : config;
-
-  // Resolve model: explicit option > config > default
-  const resolvedModel = model ?? config.model;
-
-  // Resolve agent provider: explicit option > config > default
-  const agentName = agent ?? config.agent ?? "claude-code";
+  // Resolve agent provider: explicit option > default
+  const agentName = agent ?? "claude-code";
   const provider = getAgentProvider(agentName);
 
-  // Resolve image name: explicit option > config > default
-  const resolvedImageName =
-    options.imageName ?? config.imageName ?? defaultImageName(hostRepoDir);
+  // Resolve image name: explicit option > default
+  const resolvedImageName = options.imageName ?? defaultImageName(hostRepoDir);
 
   // Resolve env vars
   const env = await Effect.runPromise(
@@ -270,7 +260,7 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
         hostRepoDir,
         sandboxRepoDir: SANDBOX_WORKSPACE_DIR,
         iterations: maxIterations,
-        config: resolvedConfig,
+        hooks,
         prompt: resolvedPrompt,
         branch,
         model: resolvedModel,

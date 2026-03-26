@@ -55,7 +55,6 @@ Creates the following files:
 .sandcastle/
 ├── Dockerfile      # Sandbox environment (customize as needed)
 ├── prompt.md       # Agent instructions
-├── config.json     # Agent provider and defaults
 ├── .env.example    # Token placeholders
 └── .gitignore      # Ignores .env, patches/, logs/
 ```
@@ -261,29 +260,6 @@ When customizing the Dockerfile, ensure you keep:
 
 Add your project-specific dependencies (e.g., language runtimes, build tools) to the Dockerfile as needed.
 
-### `config.json` (optional)
-
-Place a `.sandcastle/config.json` file to configure advanced behavior:
-
-```json
-{
-  "agent": "claude-code",
-  "hooks": {
-    "onSandboxReady": [{ "command": "npm install" }]
-  },
-  "defaultMaxIterations": 10,
-  "model": "claude-sonnet-4-6"
-}
-```
-
-| Field                  | Type   | Description                                                                                                                  |
-| ---------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `agent`                | string | Agent provider name. Created by `sandcastle init`. Overridden by `--agent` CLI flag. Defaults to `claude-code`.              |
-| `hooks`                | object | Lifecycle hooks that run commands inside the sandbox. See below.                                                             |
-| `defaultMaxIterations` | number | Default number of agent iterations. Overridden by the `maxIterations` option in `run()`. Defaults to 5 if unset.             |
-| `model`                | string | Default model for the agent (e.g. `claude-sonnet-4-6`). Overridden by the `--model` CLI flag. Defaults to `claude-opus-4-6`. |
-| `imageName`            | string | Default Docker image name. Overridden by `--image-name` CLI flag. Defaults to `sandcastle:local`.                            |
-
 ### Hooks
 
 Hooks are arrays of `{ "command": "..." }` objects executed sequentially inside the sandbox. If any command exits with a non-zero code, execution stops immediately with an error.
@@ -294,7 +270,16 @@ Hooks are arrays of `{ "command": "..." }` objects executed sequentially inside 
 
 **`onSandboxReady`** runs after the repo is synced in. Use it for dependency installation or build steps (e.g., `npm install`).
 
-`sandcastle init` creates a minimal `config.json` with the `agent` field. Add hooks and other fields as needed.
+Pass hooks programmatically via `run()`:
+
+```ts
+await run({
+  hooks: {
+    onSandboxReady: [{ command: "npm install" }],
+  },
+  // ...
+});
+```
 
 ## How it works
 

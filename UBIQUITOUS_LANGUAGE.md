@@ -32,12 +32,12 @@
 
 ## Project structure
 
-| Term                 | Definition                                                                                                                 | Aliases to avoid                       |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| **Config directory** | The `.sandcastle/` directory in a host repo containing sandbox configuration: Dockerfile, prompt, config, and env settings | ".sandcastle folder", "sandcastle dir" |
-| **Init**             | The CLI command that scaffolds the **config directory** in a host repo and builds the Docker image                         | "create", "bootstrap", "new"           |
-| **Build-image**      | The CLI command that rebuilds the Docker image from an existing **config directory**                                       | "setup-sandbox" (old name)             |
-| **Remove-image**     | The CLI command that removes the Docker image                                                                              | "cleanup-sandbox" (old name)           |
+| Term                 | Definition                                                                                                         | Aliases to avoid                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------- |
+| **Config directory** | The `.sandcastle/` directory in a host repo containing sandbox configuration: Dockerfile, prompt, and env settings | ".sandcastle folder", "sandcastle dir" |
+| **Init**             | The CLI command that scaffolds the **config directory** in a host repo and builds the Docker image                 | "create", "bootstrap", "new"           |
+| **Build-image**      | The CLI command that rebuilds the Docker image from an existing **config directory**                               | "setup-sandbox" (old name)             |
+| **Remove-image**     | The CLI command that removes the Docker image                                                                      | "cleanup-sandbox" (old name)           |
 
 ## Output
 
@@ -84,7 +84,7 @@
 
 > **Dev:** "How does Sandcastle know which **agent provider** to use?"
 
-> **Domain expert:** "The `agent` field in `config.json`, or the `--agent` CLI flag. The **env resolver** loads all env vars generically and passes them straight through to the **sandbox** — the **agent** handles missing credentials on its own."
+> **Domain expert:** "The `agent` option passed to `run()`, or the `--agent` CLI flag. The **env resolver** loads all env vars generically and passes them straight through to the **sandbox** — the **agent** handles missing credentials on its own."
 
 > **Dev:** "I want to reuse the same **prompt** file for multiple issues in parallel. How do I pass the issue number in?"
 

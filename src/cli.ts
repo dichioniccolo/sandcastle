@@ -6,7 +6,6 @@ import * as clack from "@clack/prompts";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { styleText } from "node:util";
-import { readConfig } from "./Config.js";
 import { Display } from "./Display.js";
 import { DEFAULT_MODEL } from "./Orchestrator.js";
 import { buildImage, removeImage } from "./DockerLifecycle.js";
@@ -33,11 +32,7 @@ const imageNameOption = Options.text("image-name").pipe(
 const resolveImageName = (
   cliFlag: import("effect").Option.Option<string>,
   cwd: string,
-  config?: import("./Config.js").SandcastleConfig,
-): string =>
-  cliFlag._tag === "Some"
-    ? cliFlag.value
-    : (config?.imageName ?? defaultImageName(cwd));
+): string => (cliFlag._tag === "Some" ? cliFlag.value : defaultImageName(cwd));
 
 const agentOption = Options.text("agent").pipe(
   Options.withDescription("Agent provider to use (e.g. claude-code)"),
@@ -195,8 +190,7 @@ const buildImageCommand = Command.make(
       const cwd = process.cwd();
       yield* requireConfigDir(cwd);
 
-      const config = yield* readConfig(cwd);
-      const imageName = resolveImageName(imageNameFlag, cwd, config);
+      const imageName = resolveImageName(imageNameFlag, cwd);
 
       const dockerfileDir = join(cwd, CONFIG_DIR);
       const dockerfilePath =
@@ -224,8 +218,7 @@ const removeImageCommand = Command.make(
       const d = yield* Display;
       const cwd = process.cwd();
 
-      const config = yield* readConfig(cwd);
-      const imageName = resolveImageName(imageNameFlag, cwd, config);
+      const imageName = resolveImageName(imageNameFlag, cwd);
 
       yield* d.spinner(
         `Removing Docker image '${imageName}'...`,
@@ -246,7 +239,6 @@ const modelOption = Options.text("model").pipe(
 
 const interactiveSession = (options: {
   hostRepoDir: string;
-  config: import("./Config.js").SandcastleConfig;
   model?: string;
 }): Effect.Effect<
   void,
@@ -254,15 +246,15 @@ const interactiveSession = (options: {
   SandboxFactory | Display
 > =>
   Effect.gen(function* () {
-    const { hostRepoDir, config } = options;
+    const { hostRepoDir } = options;
     const sandboxRepoDir = SANDBOX_WORKSPACE_DIR;
-    const resolvedModel = options.model ?? config.model ?? DEFAULT_MODEL;
+    const resolvedModel = options.model ?? DEFAULT_MODEL;
     const factory = yield* SandboxFactory;
     const d = yield* Display;
 
     yield* factory.withSandbox(({ hostWorktreePath }) =>
       withSandboxLifecycle(
-        { hostRepoDir, sandboxRepoDir, hooks: config?.hooks, hostWorktreePath },
+        { hostRepoDir, sandboxRepoDir, hostWorktreePath },
         (ctx) =>
           Effect.gen(function* () {
             // Get container ID for docker exec -it
@@ -327,11 +319,9 @@ const interactiveCommand = Command.make(
       const hostRepoDir = process.cwd();
       yield* requireConfigDir(hostRepoDir);
 
-      // Resolve agent provider: CLI flag > config > default
-      const config = yield* readConfig(hostRepoDir);
-      const imageName = resolveImageName(imageNameFlag, hostRepoDir, config);
-      const agentName =
-        agent._tag === "Some" ? agent.value : (config.agent ?? "claude-code");
+      // Resolve agent provider: CLI flag > default
+      const imageName = resolveImageName(imageNameFlag, hostRepoDir);
+      const agentName = agent._tag === "Some" ? agent.value : "claude-code";
       const provider = yield* Effect.try({
         try: () => getAgentProvider(agentName),
         catch: (e) =>
@@ -362,7 +352,6 @@ const interactiveCommand = Command.make(
 
       yield* interactiveSession({
         hostRepoDir,
-        config,
         model: resolvedModel,
       }).pipe(Effect.provide(factoryLayer));
     }),

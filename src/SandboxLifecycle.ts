@@ -1,7 +1,6 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { Effect } from "effect";
-import type { SandcastleConfig } from "./Config.js";
 import { Display } from "./Display.js";
 import { ExecError, SyncError, type SandboxError } from "./errors.js";
 import {
@@ -28,10 +27,14 @@ const execOk = (
 
 const execAsync = promisify(exec);
 
+export type SandboxHooks = {
+  readonly onSandboxReady?: ReadonlyArray<{ readonly command: string }>;
+};
+
 export interface SandboxLifecycleOptions {
   readonly hostRepoDir: string;
   readonly sandboxRepoDir: string;
-  readonly hooks?: SandcastleConfig["hooks"];
+  readonly hooks?: SandboxHooks;
   readonly branch?: string;
   /** Host-side path to the worktree directory. Required when sandboxRepoDir
    *  is a container path that doesn't exist on the host (e.g. /home/agent/workspace). */

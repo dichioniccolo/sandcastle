@@ -1,12 +1,11 @@
 import { Duration, Effect } from "effect";
-import type { SandcastleConfig } from "./Config.js";
 import { Display } from "./Display.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
 import { AgentError, TimeoutError } from "./errors.js";
 import type { SandboxError } from "./errors.js";
 import type { SandboxService } from "./SandboxFactory.js";
 import { SandboxFactory } from "./SandboxFactory.js";
-import { withSandboxLifecycle } from "./SandboxLifecycle.js";
+import { withSandboxLifecycle, type SandboxHooks } from "./SandboxLifecycle.js";
 
 export interface TokenUsage {
   readonly input_tokens: number;
@@ -124,7 +123,7 @@ export interface OrchestrateOptions {
   readonly hostRepoDir: string;
   readonly sandboxRepoDir: string;
   readonly iterations: number;
-  readonly config?: SandcastleConfig;
+  readonly hooks?: SandboxHooks;
   readonly prompt: string;
   readonly branch?: string;
   readonly model?: string;
@@ -150,7 +149,7 @@ export const orchestrate = (
   return Effect.gen(function* () {
     const factory = yield* SandboxFactory;
     const display = yield* Display;
-    const { hostRepoDir, sandboxRepoDir, iterations, config, prompt, branch } =
+    const { hostRepoDir, sandboxRepoDir, iterations, hooks, prompt, branch } =
       options;
     const resolvedModel = options.model ?? DEFAULT_MODEL;
     const completionSignal =
@@ -172,7 +171,7 @@ export const orchestrate = (
             {
               hostRepoDir,
               sandboxRepoDir,
-              hooks: config?.hooks,
+              hooks,
               branch,
               hostWorktreePath,
             },
