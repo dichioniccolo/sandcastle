@@ -1,4 +1,10 @@
-# Sandcastle
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://res.cloudinary.com/total-typescript/image/upload/v1775033787/readme-sandcastle-ondark_2x.png">
+    <source media="(prefers-color-scheme: light)" srcset="https://res.cloudinary.com/total-typescript/image/upload/v1775033787/readme-sandcastle-onlight_2x.png">
+    <img alt="Sandcastle" src="https://res.cloudinary.com/total-typescript/image/upload/v1775033787/readme-sandcastle-onlight_2x.png" width="236" height="150">
+  </picture>
+</div>
 
 A TypeScript library for orchestrating AI coding agents in isolated Docker containers. Sandcastle handles the hard parts — building worktrees, invoking the agent, and merging commits back — so you can run AFK agents with a single `run()`.
 
