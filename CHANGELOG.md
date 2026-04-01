@@ -1,5 +1,28 @@
 # @ai-hero/sandcastle
 
+## 0.1.7
+
+### Patch Changes
+
+- 5eef716: Inject `{{SOURCE_BRANCH}}` and `{{TARGET_BRANCH}}` as built-in prompt arguments. These are available in any prompt without passing them via `promptArgs`. Passing either key in `promptArgs` now fails with an error.
+- 78ef034: Fix sandbox crash on macOS by setting `HOME=/home/agent` in the container environment. Previously, Docker's `--user` flag caused `HOME` to default to `/`, making `git config --global` fail with a permission error on `//.gitconfig`.
+- fed9a66: Replace wall-clock timeout with idle-based timeout that resets on each agent output event.
+  - Rename `timeoutSeconds` → `idleTimeoutSeconds` in `RunOptions` and `OrchestrateOptions`
+  - Change default from 1200s (20 min) to 300s (5 min)
+  - Timeout now tracks from last received message (text or tool call), not run start
+  - Error message updated to: "Agent idle for N seconds — no output received. Consider increasing the idle timeout with --idle-timeout."
+
+- b16e0e0: Support multiple completion signals via `completionSignal: string | string[]`. The result field `wasCompletionSignalDetected: boolean` is replaced by `completionSignal?: string` — the matched signal string, or `undefined` if none fired.
+- 0f48ef8: Preserve worktree on failure (timeout, agent error, SIGINT, SIGTERM)
+
+  When a run session ends in failure, the sandbox (Docker container) is removed but the
+  worktree is now preserved on the host. A message is printed with the worktree path and
+  manual cleanup instructions. On successful completion, both the sandbox and worktree
+  are removed as before.
+
+  `TimeoutError` and `AgentError` now carry an optional `preservedWorktreePath` field
+  so programmatic callers can inspect or build on the preserved worktree.
+
 ## 0.1.6
 
 ### Patch Changes
