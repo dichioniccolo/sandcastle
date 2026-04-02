@@ -11,6 +11,8 @@ import type { AgentProvider, TokenUsage } from "./AgentProvider.js";
 export type { TokenUsage } from "./AgentProvider.js";
 export type { ParsedStreamEvent } from "./AgentProvider.js";
 
+const IDLE_WARNING_INTERVAL_MS = 60_000;
+
 const invokeAgent = (
   sandbox: SandboxService,
   sandboxRepoDir: string,
@@ -19,6 +21,8 @@ const invokeAgent = (
   idleTimeoutMs: number,
   onText: (text: string) => void,
   onToolCall: (name: string, formattedArgs: string) => void,
+  onIdleWarning: (minutes: number) => void,
+  idleWarningIntervalMs: number = IDLE_WARNING_INTERVAL_MS,
 ): Effect.Effect<{ result: string; usage: TokenUsage | null }, SandboxError> =>
   Effect.gen(function* () {
     let resultText = "";
@@ -28,6 +32,19 @@ const invokeAgent = (
     const timeoutSignal = yield* Deferred.make<never, TimeoutError>();
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     const idleTimeoutSeconds = idleTimeoutMs / 1000;
+
+    // Periodic idle warning state
+    let warningHandle: ReturnType<typeof setInterval> | null = null;
+    let idleMinuteCounter = 0;
+
+    const startWarningInterval = () => {
+      if (warningHandle !== null) clearInterval(warningHandle);
+      idleMinuteCounter = 0;
+      warningHandle = setInterval(() => {
+        idleMinuteCounter++;
+        onIdleWarning(idleMinuteCounter);
+      }, idleWarningIntervalMs);
+    };
 
     const resetIdleTimer = () => {
       if (timeoutHandle !== null) clearTimeout(timeoutHandle);
@@ -42,6 +59,8 @@ const invokeAgent = (
           ),
         ).catch(() => {});
       }, idleTimeoutMs);
+      // Reset warning interval on activity
+      startWarningInterval();
     };
 
     resetIdleTimer();
@@ -82,6 +101,10 @@ const invokeAgent = (
             clearTimeout(timeoutHandle);
             timeoutHandle = null;
           }
+          if (warningHandle !== null) {
+            clearInterval(warningHandle);
+            warningHandle = null;
+          }
         }),
       ),
     );
@@ -112,6 +135,8 @@ export interface OrchestrateOptions {
   readonly idleTimeoutSeconds?: number;
   /** Optional name for the run, prepended to status messages as [name] */
   readonly name?: string;
+  /** @internal Test-only override for the idle warning interval in milliseconds. Default: 60000 (1 minute). */
+  readonly _idleWarningIntervalMs?: number;
 }
 
 export interface OrchestrateResult {
@@ -189,6 +214,13 @@ export const orchestrate = (
               const onToolCall = (name: string, formattedArgs: string) => {
                 Effect.runPromise(display.toolCall(name, formattedArgs));
               };
+              const onIdleWarning = (minutes: number) => {
+                const msg =
+                  minutes === 1
+                    ? "Agent idle for 1 minute"
+                    : `Agent idle for ${minutes} minutes`;
+                Effect.runPromise(display.status(label(msg), "warn"));
+              };
               const { result: agentOutput, usage } = yield* invokeAgent(
                 ctx.sandbox,
                 ctx.sandboxRepoDir,
@@ -197,6 +229,8 @@ export const orchestrate = (
                 idleTimeoutMs,
                 onText,
                 onToolCall,
+                onIdleWarning,
+                options._idleWarningIntervalMs,
               );
 
               yield* display.status(label("Agent stopped"), "info");

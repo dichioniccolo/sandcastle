@@ -2198,4 +2198,194 @@ describe("Orchestrator Display integration", () => {
     // Should succeed because the text event at t=100ms resets the idle timer
     expect(exitResult._tag).toBe("Success");
   }, 10_000);
+
+  it("logs periodic idle warnings every IDLE_WARNING_INTERVAL_MS of inactivity", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-idle-warn-"));
+
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    // Mock agent: stays idle for 250ms (producing no output), then completes.
+    // We'll set IDLE_WARNING_INTERVAL_MS-equivalent behavior by using a very short
+    // idle timeout so warnings fire quickly. The warning interval is hardcoded at 60s
+    // in production, but we need to test the mechanism. We'll use a custom sandbox
+    // that delays output long enough for the warning interval to fire.
+    //
+    // Since the warning interval is hardcoded at 60_000ms, we can't easily test
+    // real timing. Instead we use a mock sandbox that delays 250ms with no output,
+    // and set idleTimeoutSeconds high enough not to kill. We'll verify the wiring
+    // by checking that the onIdleWarning callback fires (via display entries).
+    //
+    // To make this testable without waiting 60s, we'll override the interval
+    // via the _idleWarningIntervalMs test-only option.
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
+      hostDir,
+      (dir) => {
+        const fsLayer = makeLocalSandboxLayer(dir);
+        return Layer.succeed(Sandbox, {
+          exec: (command, options) =>
+            Effect.flatMap(Sandbox, (real) => real.exec(command, options)).pipe(
+              Effect.provide(fsLayer),
+            ),
+          execStreaming: (command, onStdoutLine, options) => {
+            if (command.startsWith("claude ")) {
+              return Effect.gen(function* () {
+                // Stay idle for 250ms — enough for ~2 warnings at 100ms interval
+                yield* Effect.promise(
+                  () => new Promise((resolve) => setTimeout(resolve, 250)),
+                );
+                onStdoutLine(
+                  JSON.stringify({ type: "result", result: "done" }),
+                );
+                return { stdout: "", stderr: "", exitCode: 0 };
+              });
+            }
+            return Effect.flatMap(Sandbox, (real) =>
+              real.execStreaming(command, onStdoutLine, options),
+            ).pipe(Effect.provide(fsLayer));
+          },
+          copyIn: (hostPath, sandboxPath) =>
+            Effect.flatMap(Sandbox, (real) =>
+              real.copyIn(hostPath, sandboxPath),
+            ).pipe(Effect.provide(fsLayer)),
+          copyOut: (sandboxPath, hostPath) =>
+            Effect.flatMap(Sandbox, (real) =>
+              real.copyOut(sandboxPath, hostPath),
+            ).pipe(Effect.provide(fsLayer)),
+        });
+      },
+    );
+
+    const displayEntries = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
+    const displayLayer = SilentDisplay.layer(displayEntries);
+
+    const exitResult = await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        sandboxRepoDir,
+        iterations: 1,
+        prompt: "test",
+        idleTimeoutSeconds: 10, // high enough not to kill
+        _idleWarningIntervalMs: 100, // fire warnings every 100ms for testing
+      }).pipe(
+        Effect.provide(Layer.merge(factoryLayer, displayLayer)),
+        Effect.exit,
+      ),
+    );
+
+    expect(exitResult._tag).toBe("Success");
+
+    const entries = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
+    const allEntries = await Effect.runPromise(Ref.get(displayEntries));
+    const warningEntries = allEntries.filter(
+      (e) => e._tag === "status" && e.severity === "warn",
+    );
+
+    // Should have at least 2 warning entries (at ~100ms and ~200ms)
+    expect(warningEntries.length).toBeGreaterThanOrEqual(2);
+    // First warning should say "1 minute" (even though the interval is 100ms in test)
+    expect((warningEntries[0] as { message: string }).message).toContain(
+      "Agent idle for 1 minute",
+    );
+    expect((warningEntries[1] as { message: string }).message).toContain(
+      "Agent idle for 2 minutes",
+    );
+  }, 10_000);
+
+  it("resets idle warning counter when agent produces output", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-idle-warn-reset-"));
+
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    // Mock agent: idle 150ms, emit text (resets counter), idle 150ms, complete.
+    // With 100ms warning interval, we should see warning at ~100ms (1 minute),
+    // then text at ~150ms resets counter, then warning at ~250ms (1 minute again, not 2).
+    const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
+      hostDir,
+      (dir) => {
+        const fsLayer = makeLocalSandboxLayer(dir);
+        return Layer.succeed(Sandbox, {
+          exec: (command, options) =>
+            Effect.flatMap(Sandbox, (real) => real.exec(command, options)).pipe(
+              Effect.provide(fsLayer),
+            ),
+          execStreaming: (command, onStdoutLine, options) => {
+            if (command.startsWith("claude ")) {
+              return Effect.gen(function* () {
+                // Idle for 150ms — warning fires at ~100ms
+                yield* Effect.promise(
+                  () => new Promise((resolve) => setTimeout(resolve, 150)),
+                );
+                // Emit text — should reset the warning counter
+                onStdoutLine(
+                  JSON.stringify({
+                    type: "assistant",
+                    message: {
+                      content: [{ type: "text", text: "working..." }],
+                    },
+                  }),
+                );
+                // Idle for another 150ms — warning fires at ~100ms after reset
+                yield* Effect.promise(
+                  () => new Promise((resolve) => setTimeout(resolve, 150)),
+                );
+                onStdoutLine(
+                  JSON.stringify({ type: "result", result: "done" }),
+                );
+                return { stdout: "", stderr: "", exitCode: 0 };
+              });
+            }
+            return Effect.flatMap(Sandbox, (real) =>
+              real.execStreaming(command, onStdoutLine, options),
+            ).pipe(Effect.provide(fsLayer));
+          },
+          copyIn: (hostPath, sandboxPath) =>
+            Effect.flatMap(Sandbox, (real) =>
+              real.copyIn(hostPath, sandboxPath),
+            ).pipe(Effect.provide(fsLayer)),
+          copyOut: (sandboxPath, hostPath) =>
+            Effect.flatMap(Sandbox, (real) =>
+              real.copyOut(sandboxPath, hostPath),
+            ).pipe(Effect.provide(fsLayer)),
+        });
+      },
+    );
+
+    const displayEntries = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
+    const displayLayer = SilentDisplay.layer(displayEntries);
+
+    const exitResult = await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        sandboxRepoDir,
+        iterations: 1,
+        prompt: "test",
+        idleTimeoutSeconds: 10,
+        _idleWarningIntervalMs: 100,
+      }).pipe(
+        Effect.provide(Layer.merge(factoryLayer, displayLayer)),
+        Effect.exit,
+      ),
+    );
+
+    expect(exitResult._tag).toBe("Success");
+
+    const allEntries = await Effect.runPromise(Ref.get(displayEntries));
+    const warningEntries = allEntries.filter(
+      (e) => e._tag === "status" && e.severity === "warn",
+    );
+
+    // Should have at least 2 warnings (one before text, one after text reset)
+    expect(warningEntries.length).toBeGreaterThanOrEqual(2);
+    // Both should say "1 minute" because the counter was reset by the text event
+    expect((warningEntries[0] as { message: string }).message).toContain(
+      "Agent idle for 1 minute",
+    );
+    expect((warningEntries[1] as { message: string }).message).toContain(
+      "Agent idle for 1 minute",
+    );
+  }, 10_000);
 });
