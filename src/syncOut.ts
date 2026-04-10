@@ -88,6 +88,8 @@ export const syncOut = async (
         }
 
         if (nonEmptyPatches.length > 0) {
+          // Abort any stale git am session (e.g. from a prior interrupted sync-out)
+          await execHost("git am --abort", hostRepoDir).catch(() => {});
           const patchArgs = nonEmptyPatches.map((p) => `"${p}"`).join(" ");
           await execHost(`git am --3way ${patchArgs}`, hostRepoDir);
         }

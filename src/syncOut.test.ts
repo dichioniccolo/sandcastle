@@ -280,6 +280,36 @@ describe("syncOut", () => {
     }
   });
 
+  it("aborts stale git am session before applying patches", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "host-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "initial.txt", "initial", "initial commit");
+
+    const provider = testIsolated();
+    const handle = await provider.create({ env: {} });
+    try {
+      await syncIn(hostDir, handle);
+
+      const wp = handle.workspacePath;
+      await handle.exec('echo "new" > new.txt', { cwd: wp });
+      await handle.exec("git add new.txt", { cwd: wp });
+      await handle.exec('git commit -m "add new"', { cwd: wp });
+
+      // Simulate a stale git am session on the host by creating rebase-apply dir
+      await execAsync("mkdir -p .git/rebase-apply", { cwd: hostDir });
+      await writeFile(join(hostDir, ".git/rebase-apply/applying"), "");
+
+      // syncOut should succeed despite the stale session
+      await syncOut(hostDir, handle);
+
+      const log = await getLog(hostDir);
+      expect(log).toHaveLength(2);
+      expect(log[0]).toContain("add new");
+    } finally {
+      await handle.close();
+    }
+  });
+
   it("preserves commit author and message metadata", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "host-"));
     await initRepo(hostDir);
