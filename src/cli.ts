@@ -28,7 +28,7 @@ import { AgentError, ConfigDirError, InitError } from "./errors.js";
 import {
   SandboxFactory,
   WorktreeDockerSandboxFactory,
-  WorktreeSandboxConfig,
+  SandboxConfig,
   SANDBOX_WORKSPACE_DIR,
 } from "./SandboxFactory.js";
 import { withSandboxLifecycle } from "./SandboxLifecycle.js";
@@ -447,7 +447,7 @@ const interactiveCommand = Command.make(
       const factoryLayer = Layer.provide(
         WorktreeDockerSandboxFactory.layer,
         Layer.merge(
-          Layer.succeed(WorktreeSandboxConfig, {
+          Layer.succeed(SandboxConfig, {
             env,
             hostRepoDir,
             sandboxProvider: docker({ imageName }),

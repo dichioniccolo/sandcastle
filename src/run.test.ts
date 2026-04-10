@@ -303,7 +303,7 @@ describe("copyToSandbox with mode none", () => {
         copyToSandbox: [".env"],
       }),
     ).rejects.toThrow(
-      "copyToSandbox is not supported with worktree mode 'none'",
+      "copyToSandbox is not supported with head branch strategy",
     );
   });
 });

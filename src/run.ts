@@ -13,10 +13,13 @@ import { orchestrate } from "./Orchestrator.js";
 import { resolvePrompt } from "./PromptResolver.js";
 import {
   WorktreeDockerSandboxFactory,
-  WorktreeSandboxConfig,
+  SandboxConfig,
   SANDBOX_WORKSPACE_DIR,
 } from "./SandboxFactory.js";
-import type { SandboxProvider } from "./SandboxProvider.js";
+import type {
+  SandboxProvider,
+  BindMountBranchStrategy,
+} from "./SandboxProvider.js";
 import { resolveEnv } from "./EnvResolver.js";
 import { generateTempBranchName, getCurrentBranch } from "./WorktreeManager.js";
 import {
@@ -198,26 +201,39 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
     agent: provider,
   } = options;
 
-  // Resolve worktree mode: default to temp-branch when omitted
-  const worktreeMode: WorktreeMode = options.worktree ?? {
-    mode: "temp-branch",
-  };
+  // Derive branch strategy from the sandbox provider (bind-mount providers expose it)
+  const branchStrategy: BindMountBranchStrategy | undefined =
+    options.sandbox.tag === "bind-mount"
+      ? options.sandbox.branchStrategy
+      : undefined;
 
-  // Validate: copyToSandbox is incompatible with mode: 'none'
+  // Also support legacy worktree option as fallback
+  const effectiveBranchType: "head" | "merge-to-head" | "branch" =
+    branchStrategy?.type ??
+    (options.worktree?.mode === "none"
+      ? "head"
+      : options.worktree?.mode === "branch"
+        ? "branch"
+        : "merge-to-head");
+
+  // Validate: copyToSandbox is incompatible with head strategy
   if (
-    worktreeMode.mode === "none" &&
+    effectiveBranchType === "head" &&
     options.copyToSandbox &&
     options.copyToSandbox.length > 0
   ) {
     throw new Error(
-      "copyToSandbox is not supported with worktree mode 'none'. " +
-        "In mode 'none' the host working directory is bind-mounted directly.",
+      "copyToSandbox is not supported with head branch strategy. " +
+        "In head mode the host working directory is bind-mounted directly.",
     );
   }
 
-  // Extract explicit branch when in branch mode, undefined for temp-branch/none mode
+  // Extract explicit branch when in branch mode
   const branch =
-    worktreeMode.mode === "branch" ? worktreeMode.branch : undefined;
+    effectiveBranchType === "branch"
+      ? ((branchStrategy as { type: "branch"; branch: string })?.branch ??
+        (options.worktree as { mode: "branch"; branch: string })?.branch)
+      : undefined;
 
   const hostRepoDir = process.cwd();
 
@@ -241,17 +257,17 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
     getCurrentBranch(hostRepoDir),
   );
 
-  // When in temp-branch mode, generate a temporary branch name.
-  // In none mode, use the host's current branch directly (no worktree).
+  // When in merge-to-head mode, generate a temporary branch name.
+  // In head mode, use the host's current branch directly (no worktree).
   const resolvedBranch =
-    worktreeMode.mode === "none"
+    effectiveBranchType === "head"
       ? currentHostBranch
       : (branch ?? generateTempBranchName(options.name));
 
   // When using a temp branch, prefix the log filename with the target branch
   // (the host's current branch) so developers can tell which branch was targeted.
   const targetBranch =
-    worktreeMode.mode === "temp-branch" ? currentHostBranch : undefined;
+    effectiveBranchType === "merge-to-head" ? currentHostBranch : undefined;
 
   // Resolve logging option
   const resolvedLogging: LoggingOption = options.logging ?? {
@@ -281,10 +297,9 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
   const factoryLayer = Layer.provide(
     WorktreeDockerSandboxFactory.layer,
     Layer.mergeAll(
-      Layer.succeed(WorktreeSandboxConfig, {
+      Layer.succeed(SandboxConfig, {
         env,
         hostRepoDir,
-        worktree: worktreeMode,
         copyToSandbox: options.copyToSandbox,
         name: options.name,
         sandboxProvider: options.sandbox,
@@ -328,10 +343,10 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
         builtInArgKeysSet,
       );
 
-      // In none mode, pass the host branch so SandboxLifecycle skips the merge step.
-      // In temp-branch mode, branch is undefined (triggers merge). In branch mode, it's the explicit branch.
+      // In head mode, pass the host branch so SandboxLifecycle skips the merge step.
+      // In merge-to-head mode, branch is undefined (triggers merge). In branch mode, it's the explicit branch.
       const orchestrateBranch =
-        worktreeMode.mode === "none" ? currentHostBranch : branch;
+        effectiveBranchType === "head" ? currentHostBranch : branch;
 
       const orchestrateResult = yield* orchestrate({
         hostRepoDir,

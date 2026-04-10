@@ -12,6 +12,7 @@ import {
   createBindMountSandboxProvider,
   type SandboxProvider,
   type BindMountSandboxHandle,
+  type BindMountBranchStrategy,
 } from "./SandboxProvider.js";
 import { testIsolated } from "./sandboxes/test-isolated.js";
 
@@ -26,7 +27,7 @@ import * as WorktreeManager from "./WorktreeManager.js";
 import {
   Sandbox,
   SandboxFactory,
-  WorktreeSandboxConfig,
+  SandboxConfig,
   WorktreeDockerSandboxFactory,
   SANDBOX_WORKSPACE_DIR,
 } from "./SandboxFactory.js";
@@ -39,7 +40,9 @@ const mockHasUncommittedChanges = vi.mocked(
 );
 
 /** Create a mock sandbox provider that records calls and delegates to a no-op handle. */
-const makeMockProvider = (): {
+const makeMockProvider = (
+  branchStrategy?: BindMountBranchStrategy,
+): {
   provider: SandboxProvider;
   createCalls: any[];
   closeCalls: number;
@@ -48,6 +51,7 @@ const makeMockProvider = (): {
   let closeCalls = 0;
   const provider = createBindMountSandboxProvider({
     name: "test-provider",
+    branchStrategy,
     create: async (options) => {
       createCalls.push(options);
       const handle: BindMountSandboxHandle = {
@@ -94,7 +98,7 @@ describe("WorktreeDockerSandboxFactory", () => {
     Layer.provide(
       WorktreeDockerSandboxFactory.layer,
       Layer.mergeAll(
-        Layer.succeed(WorktreeSandboxConfig, {
+        Layer.succeed(SandboxConfig, {
           env: { FOO: "bar" },
           hostRepoDir,
           sandboxProvider: mockProvider.provider,
@@ -106,7 +110,7 @@ describe("WorktreeDockerSandboxFactory", () => {
 
   beforeEach(async () => {
     hostRepoDir = await makeTempRepo();
-    mockProvider = makeMockProvider();
+    mockProvider = makeMockProvider({ type: "merge-to-head" });
     mockCreate.mockReturnValue(
       Effect.succeed({
         path: worktreePath,
@@ -126,15 +130,19 @@ describe("WorktreeDockerSandboxFactory", () => {
     tempDirs.length = 0;
   });
 
-  it("passes branch from config to WorktreeManager.create when branch is specified", async () => {
+  it("passes branch from provider's branchStrategy to WorktreeManager.create when branch is specified", async () => {
+    const branchProvider = createBindMountSandboxProvider({
+      name: "test-provider",
+      branchStrategy: { type: "branch", branch: "feature/my-branch" },
+      create: mockProvider.provider.create,
+    });
     const layerWithBranch = Layer.provide(
       WorktreeDockerSandboxFactory.layer,
       Layer.mergeAll(
-        Layer.succeed(WorktreeSandboxConfig, {
+        Layer.succeed(SandboxConfig, {
           env: {},
           hostRepoDir,
-          worktree: { mode: "branch", branch: "feature/my-branch" },
-          sandboxProvider: mockProvider.provider,
+          sandboxProvider: branchProvider,
         }),
         NodeFileSystem.layer,
         SilentDisplay.layer(Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([])),
@@ -174,7 +182,7 @@ describe("WorktreeDockerSandboxFactory", () => {
         return { path: worktreePath, branch: "sandcastle/20240101-000000" };
       }),
     );
-    const { provider } = makeMockProvider();
+    const { provider } = makeMockProvider({ type: "merge-to-head" });
     const origCreate = provider.create;
     (provider as any).create = async (opts: any) => {
       callOrder.push("provider-create");
@@ -184,7 +192,7 @@ describe("WorktreeDockerSandboxFactory", () => {
     const layer = Layer.provide(
       WorktreeDockerSandboxFactory.layer,
       Layer.mergeAll(
-        Layer.succeed(WorktreeSandboxConfig, {
+        Layer.succeed(SandboxConfig, {
           env: { FOO: "bar" },
           hostRepoDir,
           sandboxProvider: provider,
@@ -376,7 +384,7 @@ describe("WorktreeDockerSandboxFactory", () => {
     const layerWithCopy = Layer.provide(
       WorktreeDockerSandboxFactory.layer,
       Layer.mergeAll(
-        Layer.succeed(WorktreeSandboxConfig, {
+        Layer.succeed(SandboxConfig, {
           env: {},
           hostRepoDir,
           copyToSandbox: ["node_modules"],
@@ -513,18 +521,24 @@ describe("WorktreeDockerSandboxFactory", () => {
     ).toBeUndefined();
   });
 
-  describe("mode: none", () => {
-    const makeNoneLayer = (
+  describe("head branch strategy", () => {
+    const makeHeadProvider = () =>
+      createBindMountSandboxProvider({
+        name: "test-provider",
+        branchStrategy: { type: "head" },
+        create: mockProvider.provider.create,
+      });
+
+    const makeHeadLayer = (
       displayRef = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]),
     ) =>
       Layer.provide(
         WorktreeDockerSandboxFactory.layer,
         Layer.mergeAll(
-          Layer.succeed(WorktreeSandboxConfig, {
+          Layer.succeed(SandboxConfig, {
             env: { FOO: "bar" },
             hostRepoDir,
-            worktree: { mode: "none" },
-            sandboxProvider: mockProvider.provider,
+            sandboxProvider: makeHeadProvider(),
           }),
           NodeFileSystem.layer,
           SilentDisplay.layer(displayRef),
@@ -536,7 +550,7 @@ describe("WorktreeDockerSandboxFactory", () => {
         Effect.gen(function* () {
           const factory = yield* SandboxFactory;
           yield* factory.withSandbox(() => Effect.void);
-        }).pipe(Effect.provide(makeNoneLayer())),
+        }).pipe(Effect.provide(makeHeadLayer())),
       );
 
       expect(mockCreate).not.toHaveBeenCalled();
@@ -549,7 +563,7 @@ describe("WorktreeDockerSandboxFactory", () => {
         Effect.gen(function* () {
           const factory = yield* SandboxFactory;
           yield* factory.withSandbox(() => Effect.void);
-        }).pipe(Effect.provide(makeNoneLayer())),
+        }).pipe(Effect.provide(makeHeadLayer())),
       );
 
       expect(mockProvider.createCalls).toHaveLength(1);
@@ -569,7 +583,7 @@ describe("WorktreeDockerSandboxFactory", () => {
         Effect.gen(function* () {
           const factory = yield* SandboxFactory;
           return yield* factory.withSandbox(() => Effect.succeed("done"));
-        }).pipe(Effect.provide(makeNoneLayer())),
+        }).pipe(Effect.provide(makeHeadLayer())),
       );
 
       expect(result.preservedWorktreePath).toBeUndefined();
@@ -585,7 +599,7 @@ describe("WorktreeDockerSandboxFactory", () => {
             receivedInfo = info;
             return Effect.void;
           });
-        }).pipe(Effect.provide(makeNoneLayer())),
+        }).pipe(Effect.provide(makeHeadLayer())),
       );
 
       expect(receivedInfo?.hostWorktreePath).toBeUndefined();
@@ -629,14 +643,11 @@ const commitFile = async (
 describe("WorktreeDockerSandboxFactory — isolated providers", () => {
   const tempDirs: string[] = [];
 
-  const makeIsolatedLayer = (
-    hostRepoDir: string,
-    copyToSandbox?: string[],
-  ) =>
+  const makeIsolatedLayer = (hostRepoDir: string, copyToSandbox?: string[]) =>
     Layer.provide(
       WorktreeDockerSandboxFactory.layer,
       Layer.mergeAll(
-        Layer.succeed(WorktreeSandboxConfig, {
+        Layer.succeed(SandboxConfig, {
           env: {},
           hostRepoDir,
           copyToSandbox,
@@ -702,9 +713,7 @@ describe("WorktreeDockerSandboxFactory — isolated providers", () => {
           }),
         );
       }).pipe(
-        Effect.provide(
-          makeIsolatedLayer(hostDir, ["subdir/config.json"]),
-        ),
+        Effect.provide(makeIsolatedLayer(hostDir, ["subdir/config.json"])),
       ),
     );
 
@@ -745,11 +754,7 @@ describe("WorktreeDockerSandboxFactory — isolated providers", () => {
       Effect.gen(function* () {
         const factory = yield* SandboxFactory;
         yield* factory.withSandbox(() => Effect.void);
-      }).pipe(
-        Effect.provide(
-          makeIsolatedLayer(hostDir, ["nonexistent.txt"]),
-        ),
-      ),
+      }).pipe(Effect.provide(makeIsolatedLayer(hostDir, ["nonexistent.txt"]))),
     );
   });
 });

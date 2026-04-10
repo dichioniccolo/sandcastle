@@ -48,6 +48,8 @@ export interface BindMountCreateOptions {
 export interface BindMountSandboxProviderConfig {
   /** Human-readable name for this provider (e.g. "docker", "podman"). */
   readonly name: string;
+  /** Branch strategy. Defaults to { type: "head" } if omitted. */
+  readonly branchStrategy?: BindMountBranchStrategy;
   /** Create a sandbox handle from the given options. */
   readonly create: (
     options: BindMountCreateOptions,
@@ -96,6 +98,8 @@ export interface BindMountSandboxProvider {
   readonly tag: "bind-mount";
   /** Human-readable provider name. */
   readonly name: string;
+  /** Branch strategy — controls how the agent's changes relate to branches. Defaults to head. */
+  readonly branchStrategy: BindMountBranchStrategy;
   /** @internal Create a sandbox handle. */
   readonly create: (
     options: BindMountCreateOptions,
@@ -114,6 +118,38 @@ export interface IsolatedSandboxProvider {
   ) => Promise<IsolatedSandboxHandle>;
 }
 
+// ---------- Branch strategy types ----------
+
+/** Head strategy: agent writes directly to host working directory. Bind-mount only. */
+export interface HeadBranchStrategy {
+  readonly type: "head";
+}
+
+/** Merge-to-head strategy: temp branch, merge back to HEAD, delete temp branch. */
+export interface MergeToHeadBranchStrategy {
+  readonly type: "merge-to-head";
+}
+
+/** Branch strategy: commits land on an explicit named branch. */
+export interface NamedBranchStrategy {
+  readonly type: "branch";
+  readonly branch: string;
+}
+
+/** Branch strategy for bind-mount providers (all three variants). */
+export type BindMountBranchStrategy =
+  | HeadBranchStrategy
+  | MergeToHeadBranchStrategy
+  | NamedBranchStrategy;
+
+/** Branch strategy for isolated providers (no head — can't write to host). */
+export type IsolatedBranchStrategy =
+  | MergeToHeadBranchStrategy
+  | NamedBranchStrategy;
+
+/** Union of all branch strategy variants. */
+export type BranchStrategy = BindMountBranchStrategy | IsolatedBranchStrategy;
+
 /**
  * A sandbox provider — the pluggable unit that `run()` and `createSandbox()` accept.
  * Tagged for internal dispatch: "bind-mount" or "isolated".
@@ -131,6 +167,7 @@ export const createBindMountSandboxProvider = (
 ): BindMountSandboxProvider => ({
   tag: "bind-mount",
   name: config.name,
+  branchStrategy: config.branchStrategy ?? { type: "head" },
   create: config.create,
 });
 

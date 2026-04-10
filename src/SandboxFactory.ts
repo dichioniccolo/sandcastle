@@ -19,6 +19,7 @@ import type {
   SandboxProvider,
   BindMountSandboxProvider,
   BindMountSandboxHandle,
+  BindMountBranchStrategy,
   IsolatedSandboxProvider,
   IsolatedSandboxHandle,
 } from "./SandboxProvider.js";
@@ -149,13 +150,11 @@ export class SandboxFactory extends Context.Tag("SandboxFactory")<
   }
 >() {}
 
-export class WorktreeSandboxConfig extends Context.Tag("WorktreeSandboxConfig")<
-  WorktreeSandboxConfig,
+export class SandboxConfig extends Context.Tag("SandboxConfig")<
+  SandboxConfig,
   {
     readonly env: Record<string, string>;
     readonly hostRepoDir: string;
-    /** Worktree mode: none, temp-branch (default), or explicit branch. */
-    readonly worktree?: import("./run.js").WorktreeMode;
     /** Paths relative to the host repo root to copy into the worktree before container start. */
     readonly copyToSandbox?: string[];
     /** When specified, the run name is included in the auto-generated branch and worktree names. */
@@ -164,6 +163,9 @@ export class WorktreeSandboxConfig extends Context.Tag("WorktreeSandboxConfig")<
     readonly sandboxProvider: SandboxProvider;
   }
 >() {}
+
+/** @deprecated Use SandboxConfig instead. */
+export const WorktreeSandboxConfig = SandboxConfig;
 
 /**
  * Print a message to stderr about a preserved worktree, with review and cleanup instructions.
@@ -326,14 +328,19 @@ export const WorktreeDockerSandboxFactory = {
       const {
         env,
         hostRepoDir,
-        worktree: worktreeMode,
         copyToSandbox: copyPaths,
         name,
         sandboxProvider,
-      } = yield* WorktreeSandboxConfig;
-      const isNoneMode = worktreeMode?.mode === "none";
+      } = yield* SandboxConfig;
+
+      // Read branch strategy from the provider for bind-mount providers
+      const branchStrategy: BindMountBranchStrategy | undefined =
+        sandboxProvider.tag === "bind-mount"
+          ? sandboxProvider.branchStrategy
+          : undefined;
+      const isHeadMode = branchStrategy?.type === "head";
       const branch =
-        worktreeMode?.mode === "branch" ? worktreeMode.branch : undefined;
+        branchStrategy?.type === "branch" ? branchStrategy.branch : undefined;
       const fileSystem = yield* FileSystem.FileSystem;
       const display = yield* Display;
       return {
@@ -384,8 +391,8 @@ export const WorktreeDockerSandboxFactory = {
             );
           }
 
-          if (isNoneMode) {
-            // None mode: bind-mount host directory directly, no worktree
+          if (isHeadMode) {
+            // Head mode: bind-mount host directory directly, no worktree
             const gitPath = join(hostRepoDir, ".git");
             return resolveGitMounts(gitPath).pipe(
               Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -426,7 +433,7 @@ export const WorktreeDockerSandboxFactory = {
             );
           }
 
-          // Worktree mode (temp-branch or explicit branch)
+          // Worktree mode (merge-to-head or explicit branch)
           // Populated by the release phase when a worktree is preserved on failure,
           // so we can attach the path to recognized error types before they propagate.
           let preservedWorktreePath: string | undefined;

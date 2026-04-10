@@ -31,4 +31,10 @@ export type {
   BindMountSandboxProviderConfig,
   IsolatedCreateOptions,
   IsolatedSandboxProviderConfig,
+  BranchStrategy,
+  BindMountBranchStrategy,
+  IsolatedBranchStrategy,
+  HeadBranchStrategy,
+  MergeToHeadBranchStrategy,
+  NamedBranchStrategy,
 } from "./SandboxProvider.js";

@@ -54,6 +54,38 @@ describe("createBindMountSandboxProvider", () => {
 
     expect(provider.tag).toBe("bind-mount");
   });
+
+  it("defaults branchStrategy to head when omitted", () => {
+    const provider = createBindMountSandboxProvider({
+      name: "test-provider",
+      create: async () => makeMockHandle(),
+    });
+
+    expect(provider.branchStrategy).toEqual({ type: "head" });
+  });
+
+  it("stores explicit branchStrategy on the instance", () => {
+    const provider = createBindMountSandboxProvider({
+      name: "test-provider",
+      branchStrategy: { type: "merge-to-head" },
+      create: async () => makeMockHandle(),
+    });
+
+    expect(provider.branchStrategy).toEqual({ type: "merge-to-head" });
+  });
+
+  it("stores branch strategy with named branch", () => {
+    const provider = createBindMountSandboxProvider({
+      name: "test-provider",
+      branchStrategy: { type: "branch", branch: "feature/foo" },
+      create: async () => makeMockHandle(),
+    });
+
+    expect(provider.branchStrategy).toEqual({
+      type: "branch",
+      branch: "feature/foo",
+    });
+  });
 });
 
 describe("createIsolatedSandboxProvider", () => {
