@@ -1,5 +1,18 @@
 # @ai-hero/sandcastle
 
+## 0.4.0
+
+### Minor Changes
+
+- 40a756f: Replace `worktree` config with `branchStrategy` on the sandbox provider. Define `BranchStrategy` types (`head`, `merge-to-head`, `branch`) and wire them into bind-mount and isolated providers. `IsolatedSandboxProvider` exposes `branchStrategy` (defaulting to `{ type: "merge-to-head" }`), `testIsolated()` accepts a `branchStrategy` option, and TypeScript prevents `{ type: "head" }` on isolated providers at compile time. The deprecated `worktree` field on `RunOptions` and the `WorktreeMode` type have been removed. README documentation, code examples, the "How it works" section, and option tables have been updated to use `branchStrategy` terminology throughout.
+
+### Patch Changes
+
+- 6a16d69: Make chownInContainer non-fatal so sandbox startup doesn't crash when chown -R fails on macOS VirtioFS read-only bind mounts
+- 105f1ef: Fix pi parser to handle current pi-mono JSON stream format
+- 7bf0961: Remove TokenUsage feature from all providers and orchestrator. The TokenUsage interface, extractUsage helper, formatUsageRows function, and usage summary display have been deleted. ParsedStreamEvent's result variant no longer carries a usage field.
+- c8df3a1: Point users to #191 for using Claude subscription instead of an API key in .env.example, README, and init CLI output
+
 ## 0.3.0
 
 ### Minor Changes
