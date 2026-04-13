@@ -4,8 +4,10 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { Effect, Layer } from "effect";
 import * as clack from "@clack/prompts";
 import { execSync, spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { styleText } from "node:util";
+
 import { Display } from "./Display.js";
 import { buildImage, removeImage } from "./DockerLifecycle.js";
 import {
@@ -35,6 +37,9 @@ import {
 import { withSandboxLifecycle } from "./SandboxLifecycle.js";
 import { resolveEnv } from "./EnvResolver.js";
 import { docker } from "./sandboxes/docker.js";
+
+const require = createRequire(import.meta.url);
+const VERSION = (require("../package.json") as { version: string }).version;
 
 // --- Shared options ---
 
@@ -483,7 +488,7 @@ const dockerCommand = Command.make("docker", {}, () =>
 const rootCommand = Command.make("sandcastle", {}, () =>
   Effect.gen(function* () {
     const d = yield* Display;
-    yield* d.status("Sandcastle v0.0.1", "info");
+    yield* d.status(`Sandcastle v${VERSION}`, "info");
     yield* d.status("Use --help to see available commands.", "info");
   }),
 );
@@ -494,5 +499,5 @@ export const sandcastle = rootCommand.pipe(
 
 export const cli = Command.run(sandcastle, {
   name: "sandcastle",
-  version: "0.0.1",
+  version: VERSION,
 });
