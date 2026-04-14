@@ -20,6 +20,10 @@ Any public-facing properties or functions should have JSDOC comments explaining 
 
 ---
 
+Do not use lazy `import()`-style imports when importing Node built-ins. Just use imports.
+
+---
+
 ## Testing
 
 ### Core Principle
