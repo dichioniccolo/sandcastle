@@ -1,5 +1,15 @@
 Wherever possible, use Effect primitives like `FileSystem` over promises. This is so that we can make use of DI and type-safe errors from Effect. However, Effect should not leak out into the user-facing API.
 
+Even if the outer function is a promise (such as in user-facing API's) the inner function should immediately delegate to Effect. Running multiple `.runPromise`'s inside a single function should be a red flag that we need to refactor to something like this:
+
+```ts
+const outerFunc = async () => {
+  const inner = Effect.gen(function* () {
+    // Do stuff in here
+  }).pipe(Effect.runPromise);
+};
+```
+
 ---
 
 Before writing a changeset, explore other potentially related changesets so you don't duplicate effort.
