@@ -28,14 +28,16 @@ import type { DockerError, SandboxError } from "./errors.js";
 import { AgentIdleTimeoutError } from "./errors.js";
 import { SandboxFactory } from "./SandboxFactory.js";
 import { encodeProjectPath } from "./SessionStore.js";
+import { defaultSessionPathsLayer, sessionPathsLayer } from "./SessionPaths.js";
 import type { BindMountSandboxHandle } from "./SandboxProvider.js";
 
 const execAsync = promisify(exec);
 
 const testProvider = claudeCode("test-model");
 
-const testDisplayLayer = SilentDisplay.layer(
-  Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]),
+const testDisplayLayer = Layer.merge(
+  SilentDisplay.layer(Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([])),
+  defaultSessionPathsLayer,
 );
 
 const initRepo = async (dir: string) => {
@@ -1107,7 +1109,13 @@ describe("Orchestrator tool call display integration", () => {
         iterations: 1,
         prompt: "do some work",
       }).pipe(
-        Effect.provide(Layer.merge(mockLayer.factoryLayer, displayLayer)),
+        Effect.provide(
+          Layer.mergeAll(
+            mockLayer.factoryLayer,
+            displayLayer,
+            defaultSessionPathsLayer,
+          ),
+        ),
       ),
     );
 
@@ -1756,7 +1764,11 @@ describe("Orchestrator Display integration", () => {
 
         iterations: 5,
         prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, displayLayer))),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(factoryLayer, displayLayer, defaultSessionPathsLayer),
+        ),
+      ),
     );
 
     const entries = await Effect.runPromise(Ref.get(ref));
@@ -1819,7 +1831,11 @@ describe("Orchestrator Display integration", () => {
 
         iterations: 2,
         prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, displayLayer))),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(factoryLayer, displayLayer, defaultSessionPathsLayer),
+        ),
+      ),
     );
 
     const entries = await Effect.runPromise(Ref.get(ref));
@@ -1893,7 +1909,11 @@ describe("Orchestrator Display integration", () => {
         iterations: 1,
         prompt: "do some work",
         name: "issue-42",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, displayLayer))),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(factoryLayer, displayLayer, defaultSessionPathsLayer),
+        ),
+      ),
     );
 
     const entries = await Effect.runPromise(Ref.get(ref));
@@ -1933,7 +1953,11 @@ describe("Orchestrator Display integration", () => {
 
         iterations: 1,
         prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, displayLayer))),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(factoryLayer, displayLayer, defaultSessionPathsLayer),
+        ),
+      ),
     );
 
     const entries = await Effect.runPromise(Ref.get(ref));
@@ -2179,7 +2203,9 @@ describe("Orchestrator Display integration", () => {
         idleTimeoutSeconds: 10, // high enough not to kill
         _idleWarningIntervalMs: 100, // fire warnings every 100ms for testing
       }).pipe(
-        Effect.provide(Layer.merge(factoryLayer, displayLayer)),
+        Effect.provide(
+          Layer.mergeAll(factoryLayer, displayLayer, defaultSessionPathsLayer),
+        ),
         Effect.exit,
       ),
     );
@@ -2270,7 +2296,9 @@ describe("Orchestrator Display integration", () => {
         idleTimeoutSeconds: 10,
         _idleWarningIntervalMs: 100,
       }).pipe(
-        Effect.provide(Layer.merge(factoryLayer, displayLayer)),
+        Effect.provide(
+          Layer.mergeAll(factoryLayer, displayLayer, defaultSessionPathsLayer),
+        ),
         Effect.exit,
       ),
     );
@@ -2516,7 +2544,11 @@ describe("Orchestrator with pi provider", () => {
 
         iterations: 1,
         prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, displayLayer))),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(factoryLayer, displayLayer, defaultSessionPathsLayer),
+        ),
+      ),
     );
 
     const entries = await Effect.runPromise(Ref.get(ref));
@@ -2600,7 +2632,11 @@ describe("Orchestrator with pi provider", () => {
 
         iterations: 1,
         prompt: "do some work",
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, displayLayer))),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(factoryLayer, displayLayer, defaultSessionPathsLayer),
+        ),
+      ),
     );
 
     const entries = await Effect.runPromise(Ref.get(ref));
@@ -2892,14 +2928,22 @@ describe("Session capture integration", () => {
       mockSessionId,
     );
 
+    const sandboxProjectsDir = join("/home/agent", ".claude", "projects");
     const result = await Effect.runPromise(
       orchestrate({
         provider: testProvider,
         hostRepoDir: hostDir,
         iterations: 1,
         prompt: "do some work",
-        _hostProjectsDir: hostProjectsDir,
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            factoryLayer,
+            testDisplayLayer,
+            sessionPathsLayer({ hostProjectsDir, sandboxProjectsDir }),
+          ),
+        ),
+      ),
     );
 
     // Verify iteration result
@@ -3041,15 +3085,23 @@ describe("Session capture integration", () => {
       mockSessionId,
     );
 
+    const sandboxProjectsDir = join("/home/agent", ".claude", "projects");
     const result = await Effect.runPromise(
       orchestrate({
         provider: testProvider,
         hostRepoDir: hostDir,
         iterations: 1,
         prompt: "continue working",
-        _hostProjectsDir: hostProjectsDir,
         resumeSession: mockSessionId,
-      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            factoryLayer,
+            testDisplayLayer,
+            sessionPathsLayer({ hostProjectsDir, sandboxProjectsDir }),
+          ),
+        ),
+      ),
     );
 
     // Verify iteration result
