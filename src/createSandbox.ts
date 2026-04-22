@@ -400,36 +400,30 @@ const buildSandboxHandle = (
                     cwd: sandboxRepoDir,
                   });
 
-                  // Race with abort signal if provided
+                  // Race exec with abort signal if provided
                   const signal = interactiveOptions.signal;
-                  let result: { exitCode: number };
-                  if (signal) {
-                    result = yield* Effect.promise(() => {
-                      if (signal.aborted) {
-                        return Promise.reject(signal.reason);
-                      }
-                      return new Promise<{ exitCode: number }>(
-                        (resolve, reject) => {
-                          const onAbort = () => reject(signal.reason);
-                          signal.addEventListener("abort", onAbort, {
-                            once: true,
-                          });
-                          execPromise.then(
-                            (r) => {
-                              signal.removeEventListener("abort", onAbort);
-                              resolve(r);
-                            },
-                            (e) => {
-                              signal.removeEventListener("abort", onAbort);
-                              reject(e);
-                            },
-                          );
-                        },
-                      );
-                    });
-                  } else {
-                    result = yield* Effect.promise(() => execPromise);
-                  }
+                  const result = yield* Effect.promise(() => {
+                    if (!signal) return execPromise;
+                    if (signal.aborted) return Promise.reject(signal.reason);
+                    return new Promise<{ exitCode: number }>(
+                      (resolve, reject) => {
+                        const onAbort = () => reject(signal.reason);
+                        signal.addEventListener("abort", onAbort, {
+                          once: true,
+                        });
+                        execPromise.then(
+                          (r) => {
+                            signal.removeEventListener("abort", onAbort);
+                            resolve(r);
+                          },
+                          (e) => {
+                            signal.removeEventListener("abort", onAbort);
+                            reject(e);
+                          },
+                        );
+                      },
+                    );
+                  });
 
                   return result.exitCode;
                 }),
