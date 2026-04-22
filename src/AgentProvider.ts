@@ -270,6 +270,42 @@ export const codex = (
 });
 
 // ---------------------------------------------------------------------------
+// Cursor agent provider
+// ---------------------------------------------------------------------------
+
+/** Options for the cursor agent provider. */
+export interface CursorOptions {
+  /** Environment variables injected by this agent provider. */
+  readonly env?: Record<string, string>;
+}
+
+export const cursor = (
+  model: string,
+  options?: CursorOptions,
+): AgentProvider => ({
+  name: "cursor",
+  env: options?.env ?? {},
+  captureSessions: false,
+
+  buildPrintCommand({ prompt }: AgentCommandOptions): PrintCommand {
+    return {
+      command: `agent --print --output-format stream-json --model ${shellEscape(model)} -p -`,
+      stdin: prompt,
+    };
+  },
+
+  buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
+    const args = ["agent", "--model", model];
+    if (prompt) args.push(prompt);
+    return args;
+  },
+
+  parseStreamLine(line: string): ParsedStreamEvent[] {
+    return parseStreamJsonLine(line);
+  },
+});
+
+// ---------------------------------------------------------------------------
 // OpenCode agent provider
 // ---------------------------------------------------------------------------
 
