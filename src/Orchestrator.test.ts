@@ -2668,7 +2668,7 @@ const toCodexStreamJson = (output: string): string => {
   lines.push(
     JSON.stringify({
       type: "item.completed",
-      item: { type: "agent_message", content: output },
+      item: { type: "agent_message", text: output },
     }),
   );
   return lines.join("\n");
