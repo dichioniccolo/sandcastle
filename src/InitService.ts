@@ -161,10 +161,13 @@ RUN apt-get update && apt-get install -y \\
 # --user 1000:1000 (Docker) map to the correct home directory owner.
 RUN usermod -d /home/agent -m -l agent node
 
+USER agent
+
 # Install Cursor Agent CLI
 RUN curl https://cursor.com/install -fsS | bash
 
-USER agent
+# Add Cursor CLI to PATH
+ENV PATH="/home/agent/.local/bin:$PATH"
 
 WORKDIR /home/agent
 
@@ -235,7 +238,7 @@ OPENAI_KEY=`,
   {
     name: "cursor",
     label: "Cursor",
-    defaultModel: "claude-sonnet-4-6",
+    defaultModel: "composer-2",
     factoryImport: "cursor",
     dockerfileTemplate: CURSOR_DOCKERFILE,
     envExample: `# Cursor API key (recommended)

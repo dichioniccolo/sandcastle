@@ -287,15 +287,26 @@ export const cursor = (
   env: options?.env ?? {},
   captureSessions: false,
 
-  buildPrintCommand({ prompt }: AgentCommandOptions): PrintCommand {
+  buildPrintCommand({
+    prompt,
+    dangerouslySkipPermissions,
+  }: AgentCommandOptions): PrintCommand {
+    const trustFlag = dangerouslySkipPermissions ? "--yolo" : "--trust";
     return {
-      command: `agent --print --output-format stream-json --model ${shellEscape(model)} -p -`,
-      stdin: prompt,
+      command: `agent --print --output-format stream-json ${trustFlag} --model ${shellEscape(model)} -p ${shellEscape(prompt)}`,
     };
   },
 
-  buildInteractiveArgs({ prompt }: AgentCommandOptions): string[] {
-    const args = ["agent", "--model", model];
+  buildInteractiveArgs({
+    prompt,
+    dangerouslySkipPermissions,
+  }: AgentCommandOptions): string[] {
+    const args = [
+      "agent",
+      dangerouslySkipPermissions ? "--yolo" : "--trust",
+      "--model",
+      model,
+    ];
     if (prompt) args.push(prompt);
     return args;
   },

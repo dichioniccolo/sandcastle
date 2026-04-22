@@ -590,15 +590,15 @@ describe("cursor factory", () => {
     const { command } = provider.buildPrintCommand(opts("do something"));
     expect(command).toContain("--print");
     expect(command).toContain("--output-format stream-json");
+    expect(command).toContain("--yolo");
     expect(command).toContain("--model 'claude-sonnet-4-6'");
   });
 
   it("buildPrintCommand delivers prompt via stdin, not argv", () => {
     const provider = cursor("claude-sonnet-4-6");
     const { command, stdin } = provider.buildPrintCommand(opts("it's a test"));
-    expect(command).toContain("-p -");
-    expect(command).not.toContain("it's a test");
-    expect(stdin).toBe("it's a test");
+    expect(command).toContain("-p 'it'\\''s a test'");
+    expect(stdin).toBeUndefined();
   });
 
   it("buildInteractiveArgs includes binary, model and prompt", () => {
@@ -609,6 +609,7 @@ describe("cursor factory", () => {
     });
     expect(args).toEqual([
       "agent",
+      "--yolo",
       "--model",
       "claude-sonnet-4-6",
       "test prompt",
@@ -621,7 +622,17 @@ describe("cursor factory", () => {
       prompt: "",
       dangerouslySkipPermissions: true,
     });
-    expect(args).toEqual(["agent", "--model", "claude-sonnet-4-6"]);
+    expect(args).toEqual(["agent", "--yolo", "--model", "claude-sonnet-4-6"]);
+  });
+
+  it("buildPrintCommand uses --trust when dangerouslySkipPermissions is false", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const { command } = provider.buildPrintCommand({
+      prompt: "do something",
+      dangerouslySkipPermissions: false,
+    });
+    expect(command).toContain("--trust");
+    expect(command).not.toContain("--yolo");
   });
 
   it("parseStreamLine extracts text from assistant message", () => {

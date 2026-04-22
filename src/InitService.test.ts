@@ -108,7 +108,7 @@ describe("Agent registry", () => {
     const agent = getAgent("cursor");
     expect(agent).toBeDefined();
     expect(agent!.name).toBe("cursor");
-    expect(agent!.defaultModel).toBe("claude-sonnet-4-6");
+    expect(agent!.defaultModel).toBe("composer-2");
     expect(agent!.factoryImport).toBe("cursor");
     expect(agent!.dockerfileTemplate).toContain("FROM");
     expect(agent!.dockerfileTemplate).toContain("cursor.com/install");
@@ -713,6 +713,10 @@ describe("InitService scaffold", () => {
     );
     expect(dockerfile).toContain("FROM node:22-bookworm");
     expect(dockerfile).toContain("cursor.com/install");
+    expect(dockerfile).toContain('ENV PATH="/home/agent/.local/bin:$PATH"');
+    expect(dockerfile).toMatch(
+      /USER agent[\s\S]*RUN curl https:\/\/cursor\.com\/install -fsS \| bash/,
+    );
     expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
   });
 
