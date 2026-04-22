@@ -454,7 +454,7 @@ describe("codex factory", () => {
     const provider = codex("gpt-5.4-mini");
     const line = JSON.stringify({
       type: "item.completed",
-      item: { type: "agent_message", content: "Hello world" },
+      item: { type: "agent_message", text: "Hello world" },
     });
     expect(provider.parseStreamLine(line)).toEqual([
       { type: "text", text: "Hello world" },
@@ -496,11 +496,23 @@ describe("codex factory", () => {
     expect(provider.parseStreamLine("{bad json")).toEqual([]);
   });
 
-  it("parseStreamLine handles item.completed with missing content", () => {
+  it("parseStreamLine handles item.completed with missing text", () => {
     const provider = codex("gpt-5.4-mini");
     const line = JSON.stringify({
       type: "item.completed",
       item: { type: "agent_message" },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([]);
+  });
+
+  it("parseStreamLine does not extract from item.content (array form), only item.text", () => {
+    const provider = codex("gpt-5.4-mini");
+    const line = JSON.stringify({
+      type: "item.completed",
+      item: {
+        type: "agent_message",
+        content: [{ type: "text", text: "from content array" }],
+      },
     });
     expect(provider.parseStreamLine(line)).toEqual([]);
   });

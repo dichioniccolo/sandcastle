@@ -198,9 +198,9 @@ const parseCodexStreamLine = (line: string): ParsedStreamEvent[] => {
     if (
       obj.type === "item.completed" &&
       obj.item?.type === "agent_message" &&
-      typeof obj.item.content === "string"
+      typeof obj.item.text === "string"
     ) {
-      const text = obj.item.content;
+      const text = obj.item.text;
       return [
         { type: "text", text },
         { type: "result", result: text },
