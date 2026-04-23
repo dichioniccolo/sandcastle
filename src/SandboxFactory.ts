@@ -26,6 +26,7 @@ import type {
 import { runHostHooks, type SandboxHooks } from "./SandboxLifecycle.js";
 import { startSandbox } from "./startSandbox.js";
 import { syncOut } from "./syncOut.js";
+import { patchGitMountsForWindows } from "./mountUtils.js";
 
 export interface ExecResult {
   readonly stdout: string;
@@ -432,6 +433,21 @@ export const WorktreeDockerSandboxFactory = {
                   }) as E | SandboxError,
               ),
               Effect.flatMap((gitMounts) =>
+                // Patch git mounts for Windows worktree compatibility (ADR-0006)
+                Effect.tryPromise({
+                  try: () =>
+                    patchGitMountsForWindows(
+                      gitMounts,
+                      hostRepoDir,
+                      SANDBOX_REPO_DIR,
+                    ),
+                  catch: (e) =>
+                    new WorktreeError({
+                      message: `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
+                    }),
+                }),
+              ),
+              Effect.flatMap((gitMounts) =>
                 Effect.acquireUseRelease(
                   startSandbox({
                     provider: sandboxProvider,
@@ -503,6 +519,21 @@ export const WorktreeDockerSandboxFactory = {
                       new WorktreeError({
                         message: `Failed to resolve git mounts: ${e}`,
                       }),
+                  ),
+                  // Patch git mounts for Windows worktree compatibility (ADR-0006)
+                  Effect.flatMap((gitMounts) =>
+                    Effect.tryPromise({
+                      try: () =>
+                        patchGitMountsForWindows(
+                          gitMounts,
+                          worktreeInfo.path,
+                          SANDBOX_REPO_DIR,
+                        ),
+                      catch: (e) =>
+                        new WorktreeError({
+                          message: `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
+                        }),
+                    }),
                   ),
                   Effect.flatMap(
                     (
