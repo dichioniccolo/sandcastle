@@ -1136,6 +1136,96 @@ describe("withSandboxLifecycle (worktree mode)", () => {
       ),
     ).rejects.toThrow(/Host hook failed/);
   });
+
+  it("sandbox.onSandboxReady respects per-hook timeoutMs", async () => {
+    const { hostDir, worktreeDir } = await setupWorktree();
+
+    const spySandboxLayer = Layer.succeed(Sandbox, {
+      exec: (command, _options) => {
+        if (command === "slow-install") {
+          // Simulate a command that takes longer than the short timeout
+          return Effect.gen(function* () {
+            yield* Effect.sleep("2 seconds");
+            return { stdout: "", stderr: "", exitCode: 0 };
+          });
+        }
+        return Effect.succeed({ stdout: "", stderr: "", exitCode: 0 });
+      },
+      copyIn: () => Effect.succeed(undefined as never),
+      copyFileOut: () => Effect.succeed(undefined as never),
+    });
+
+    const result = Effect.runPromise(
+      withSandboxLifecycle(
+        {
+          hostRepoDir: hostDir,
+          sandboxRepoDir: worktreeDir,
+          branch: "sandcastle/test",
+          hooks: {
+            sandbox: {
+              onSandboxReady: [
+                { command: "slow-install", timeoutMs: 500 },
+              ],
+            },
+          },
+        },
+        () => Effect.succeed("ok"),
+      ).pipe(Effect.provide(Layer.merge(spySandboxLayer, testDisplayLayer))),
+    );
+
+    await expect(result).rejects.toThrow(/timed out/);
+  });
+
+  it("host.onSandboxReady respects per-hook timeoutMs", async () => {
+    const { hostDir, worktreeDir, layer } = await setupWorktree();
+
+    const result = Effect.runPromise(
+      withSandboxLifecycle(
+        {
+          hostRepoDir: hostDir,
+          sandboxRepoDir: worktreeDir,
+          branch: "sandcastle/test",
+          hooks: {
+            host: {
+              onSandboxReady: [
+                { command: "sleep 2", timeoutMs: 500 },
+              ],
+            },
+          },
+        },
+        () => Effect.succeed("ok"),
+      ).pipe(Effect.provide(Layer.merge(layer, testDisplayLayer))),
+    );
+
+    await expect(result).rejects.toThrow(/timed out/);
+  });
+
+  it("sandbox.onSandboxReady uses default timeout when timeoutMs omitted", async () => {
+    const { hostDir, worktreeDir, layer } = await setupWorktree();
+
+    // A fast hook with no timeoutMs should succeed with the default 60s timeout
+    await Effect.runPromise(
+      withSandboxLifecycle(
+        {
+          hostRepoDir: hostDir,
+          sandboxRepoDir: worktreeDir,
+          branch: "sandcastle/test",
+          hooks: {
+            sandbox: {
+              onSandboxReady: [{ command: "echo default-timeout > dt.txt" }],
+            },
+          },
+        },
+        (ctx) =>
+          Effect.gen(function* () {
+            const result = yield* ctx.sandbox.exec("cat dt.txt", {
+              cwd: ctx.sandboxRepoDir,
+            });
+            expect(result.stdout.trim()).toBe("default-timeout");
+          }),
+      ).pipe(Effect.provide(Layer.merge(layer, testDisplayLayer))),
+    );
+  });
 });
 
 describe("runHostHooks", () => {
@@ -1206,6 +1296,32 @@ describe("runHostHooks", () => {
     );
 
     const content = await readFile(join(dir, "result.txt"), "utf-8");
+    expect(content.trim()).toBe("ok");
+  });
+
+  it("respects per-hook timeoutMs override", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "host-hooks-"));
+
+    // sleep 2 with a 500ms timeout should fail
+    await expect(
+      Effect.runPromise(
+        runHostHooks(
+          [{ command: "sleep 2", timeoutMs: 500 }],
+          dir,
+        ),
+      ),
+    ).rejects.toThrow(/timed out/);
+  });
+
+  it("uses default timeout when timeoutMs is not specified", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "host-hooks-"));
+
+    // A fast command should succeed with default 60s timeout
+    await Effect.runPromise(
+      runHostHooks([{ command: "echo ok > timeout-default.txt" }], dir),
+    );
+
+    const content = await readFile(join(dir, "timeout-default.txt"), "utf-8");
     expect(content.trim()).toBe("ok");
   });
 });
