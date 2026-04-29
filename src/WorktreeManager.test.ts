@@ -2,7 +2,14 @@ import { Effect } from "effect";
 import { FileSystem } from "@effect/platform";
 import { NodeFileSystem } from "@effect/platform-node";
 import { exec } from "node:child_process";
-import { mkdir, mkdtemp, readdir, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -330,7 +337,12 @@ describe("WorktreeManager.create", () => {
 
     // Create a branch with a commit that will conflict during rebase
     await execAsync("git checkout -b feat/rebase-test", { cwd: repoDir });
-    await commitFile(repoDir, "conflict.txt", "branch-content", "branch commit");
+    await commitFile(
+      repoDir,
+      "conflict.txt",
+      "branch-content",
+      "branch commit",
+    );
     await execAsync("git checkout main", { cwd: repoDir });
 
     // Create a conflicting commit on main so rebase will pause
@@ -491,6 +503,25 @@ describe("WorktreeManager.pruneStale", () => {
     await run(remove(path));
     // suppress unused var warning
     void name;
+  });
+
+  it("does not remove active worktrees when .sandcastle is a symlink", async () => {
+    // Regression test for #470: git canonicalizes worktree paths, so when
+    // .sandcastle is a symlink the un-canonicalized entryPath never matched
+    // the active-set and active worktrees got wiped out from under their
+    // running sandboxes.
+    const repoDir = await setupRepo();
+    const externalDir = await mkdtemp(join(tmpdir(), "wt-external-"));
+    await symlink(externalDir, join(repoDir, ".sandcastle"));
+
+    const { path } = await run(create(repoDir));
+
+    await run(pruneStale(repoDir));
+
+    const s = await stat(path);
+    expect(s.isDirectory()).toBe(true);
+
+    await run(remove(path));
   });
 });
 

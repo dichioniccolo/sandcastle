@@ -324,6 +324,14 @@ export const pruneStale = (
 
     if (entries === null) return;
 
+    // `git worktree list` canonicalizes paths via realpath. If repoDir or
+    // .sandcastle is a symlink, joining the un-canonicalized prefix produces
+    // strings that never match git's output, and every active worktree looks
+    // orphaned. Resolve the prefix once so the Set lookup below works.
+    const realWorktreesDir = yield* fs
+      .realPath(worktreesDir)
+      .pipe(Effect.catchAll(() => Effect.succeed(worktreesDir)));
+
     // Get the list of active worktree paths from git
     const worktreeList = yield* execGit(
       ["worktree", "list", "--porcelain"],
@@ -338,7 +346,7 @@ export const pruneStale = (
 
     // Remove any directory under .sandcastle/worktrees/ that is not an active worktree
     for (const entry of entries) {
-      const entryPath = join(worktreesDir, entry);
+      const entryPath = join(realWorktreesDir, entry);
       const isDir = yield* fs.stat(entryPath).pipe(
         Effect.map((s) => s.type === "Directory"),
         Effect.catchAll(() => Effect.succeed(false)),
