@@ -27,7 +27,7 @@ const extractPlanIssues = (
   if (planMatch?.[1]) candidates.push(planMatch[1]);
   const fencedJsonMatch = stdout.match(/```json\s*([\s\S]*?)```/i);
   if (fencedJsonMatch?.[1]) candidates.push(fencedJsonMatch[1]);
-  const firstObjectMatch = stdout.match(/\{[\s\S]*\}/);
+  const firstObjectMatch = stdout.match(/\{[\s\S]*?\}/);
   if (firstObjectMatch?.[0]) candidates.push(firstObjectMatch[0]);
 
   for (const candidate of candidates) {
@@ -209,9 +209,7 @@ for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
       // A markdown list of branch names, one per line.
       BRANCHES: completedBranches.map((b) => `- ${b}`).join("\n"),
       // A markdown list of issue IDs and titles, one per line.
-      ISSUES: completedIssues
-        .map((i) => `- ${i.id}: ${i.title}`)
-        .join("\n"),
+      ISSUES: completedIssues.map((i) => `- ${i.id}: ${i.title}`).join("\n"),
     },
   });
 

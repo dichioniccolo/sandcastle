@@ -590,15 +590,24 @@ describe("cursor factory", () => {
     const { command } = provider.buildPrintCommand(opts("do something"));
     expect(command).toContain("--print");
     expect(command).toContain("--output-format stream-json");
-    expect(command).toContain("--yolo");
+    expect(command).toContain("--force");
     expect(command).toContain("--model 'claude-sonnet-4-6'");
   });
 
-  it("buildPrintCommand delivers prompt via stdin, not argv", () => {
+  it("buildPrintCommand passes prompt as a positional shell-escaped argument", () => {
     const provider = cursor("claude-sonnet-4-6");
     const { command, stdin } = provider.buildPrintCommand(opts("it's a test"));
-    expect(command).toContain("-p 'it'\\''s a test'");
+    expect(command.endsWith("'it'\\''s a test'")).toBe(true);
+    expect(command).not.toContain(" -p ");
     expect(stdin).toBeUndefined();
+  });
+
+  it("buildPrintCommand rejects prompts larger than the argv-safe limit", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const huge = "x".repeat(120 * 1024 + 1);
+    expect(() => provider.buildPrintCommand(opts(huge))).toThrow(
+      /Cursor print-mode prompt/,
+    );
   });
 
   it("buildInteractiveArgs includes binary, model and prompt", () => {
@@ -609,9 +618,9 @@ describe("cursor factory", () => {
     });
     expect(args).toEqual([
       "agent",
-      "--yolo",
       "--model",
       "claude-sonnet-4-6",
+      "--force",
       "test prompt",
     ]);
   });
@@ -622,17 +631,18 @@ describe("cursor factory", () => {
       prompt: "",
       dangerouslySkipPermissions: true,
     });
-    expect(args).toEqual(["agent", "--yolo", "--model", "claude-sonnet-4-6"]);
+    expect(args).toEqual(["agent", "--model", "claude-sonnet-4-6", "--force"]);
   });
 
-  it("buildPrintCommand uses --trust when dangerouslySkipPermissions is false", () => {
+  // Orchestrator.invokeAgent always passes dangerouslySkipPermissions: true in print mode;
+  // this branch is still used by interactive mode and direct provider.buildPrintCommand callers.
+  it("buildPrintCommand does not include --force when dangerouslySkipPermissions is false", () => {
     const provider = cursor("claude-sonnet-4-6");
     const { command } = provider.buildPrintCommand({
       prompt: "do something",
       dangerouslySkipPermissions: false,
     });
-    expect(command).toContain("--trust");
-    expect(command).not.toContain("--yolo");
+    expect(command).not.toContain("--force");
   });
 
   it("parseStreamLine extracts text from assistant message", () => {
@@ -659,6 +669,38 @@ describe("cursor factory", () => {
     expect(provider.parseStreamLine(line)).toEqual([
       { type: "tool_call", name: "Bash", args: "npm test" },
     ]);
+  });
+
+  it("parseStreamLine extracts top-level tool_call readToolCall (Cursor stream-json)", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const line = JSON.stringify({
+      type: "tool_call",
+      subtype: "started",
+      call_id: "toolu_vrtx_01",
+      tool_call: {
+        readToolCall: { args: { path: "README.md" } },
+      },
+      session_id: "c6b62c6f-7ead-4fd6-9922-e952131177ff",
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "Read", args: "README.md" },
+    ]);
+  });
+
+  it("parseStreamLine ignores tool_call completed events", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const line = JSON.stringify({
+      type: "tool_call",
+      subtype: "completed",
+      call_id: "toolu_vrtx_01",
+      tool_call: {
+        readToolCall: {
+          args: { path: "README.md" },
+          result: { success: { content: "hello" } },
+        },
+      },
+    });
+    expect(provider.parseStreamLine(line)).toEqual([]);
   });
 
   it("parseStreamLine extracts result event", () => {

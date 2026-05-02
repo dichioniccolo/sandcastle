@@ -70,6 +70,85 @@ const parseStreamJsonLine = (line: string): ParsedStreamEvent[] => {
   return [];
 };
 
+/**
+ * Cursor Agent CLI print mode passes the prompt as a positional argv argument; stdin is not
+ * documented for delivering the prompt. Linux enforces a per-argument limit (~128 KiB, ARG_MAX
+ * stack). Stay slightly under so users get a clear error instead of spawn E2BIG.
+ */
+const CURSOR_PRINT_PROMPT_MAX_BYTES = 120 * 1024;
+
+function assertCursorPrintPromptFitsArgv(prompt: string): void {
+  const n = Buffer.byteLength(prompt, "utf8");
+  if (n > CURSOR_PRINT_PROMPT_MAX_BYTES) {
+    throw new Error(
+      `Cursor print-mode prompt is ${n} bytes (max ${CURSOR_PRINT_PROMPT_MAX_BYTES} bytes). The Cursor CLI accepts the prompt only as a command-line argument; shorten the prompt or split the work. Other Sandcastle providers use stdin for large prompts.`,
+    );
+  }
+}
+
+/** Cursor stream-json emits top-level `tool_call` events (see Cursor CLI output-format docs). */
+const parseCursorToolCallStarted = (
+  obj: Record<string, unknown>,
+): ParsedStreamEvent[] => {
+  if (obj.type !== "tool_call" || obj.subtype !== "started") return [];
+  const toolCall = obj.tool_call;
+  if (!toolCall || typeof toolCall !== "object") return [];
+
+  const tc = toolCall as Record<string, unknown>;
+
+  const readToolCall = tc.readToolCall as
+    | { args?: { path?: unknown } }
+    | undefined;
+  if (readToolCall?.args && typeof readToolCall.args.path === "string") {
+    return [{ type: "tool_call", name: "Read", args: readToolCall.args.path }];
+  }
+
+  const writeToolCall = tc.writeToolCall as
+    | { args?: { path?: unknown } }
+    | undefined;
+  if (writeToolCall?.args && typeof writeToolCall.args.path === "string") {
+    return [
+      { type: "tool_call", name: "Write", args: writeToolCall.args.path },
+    ];
+  }
+
+  const fn = tc.function as { name?: unknown; arguments?: unknown } | undefined;
+  if (fn && typeof fn.name === "string") {
+    const rawArgs = typeof fn.arguments === "string" ? fn.arguments : "";
+    if (rawArgs) {
+      try {
+        const parsedArgs = JSON.parse(rawArgs) as Record<string, unknown>;
+        if (typeof parsedArgs.command === "string") {
+          return [
+            { type: "tool_call", name: "Bash", args: parsedArgs.command },
+          ];
+        }
+      } catch {
+        // Use raw arguments string for display.
+      }
+      return [{ type: "tool_call", name: fn.name, args: rawArgs }];
+    }
+    return [{ type: "tool_call", name: fn.name, args: "" }];
+  }
+
+  return [];
+};
+
+const parseCursorStreamLine = (line: string): ParsedStreamEvent[] => {
+  if (!line.startsWith("{")) return [];
+  let obj: Record<string, unknown>;
+  try {
+    obj = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    // Not valid JSON — skip
+    return [];
+  }
+  if (obj.type === "tool_call") {
+    return parseCursorToolCallStarted(obj);
+  }
+  return parseStreamJsonLine(line);
+};
+
 /** Options passed to buildPrintCommand and buildInteractiveArgs. */
 export interface AgentCommandOptions {
   readonly prompt: string;
@@ -290,10 +369,16 @@ export const cursor = (
   buildPrintCommand({
     prompt,
     dangerouslySkipPermissions,
+    resumeSession,
   }: AgentCommandOptions): PrintCommand {
-    const trustFlag = dangerouslySkipPermissions ? "--yolo" : "--trust";
+    assertCursorPrintPromptFitsArgv(prompt);
+    const forceFlag = dangerouslySkipPermissions ? " --force" : "";
+
+    const resumeFlag = resumeSession
+      ? ` --resume ${shellEscape(resumeSession)}`
+      : "";
     return {
-      command: `agent --print --output-format stream-json ${trustFlag} --model ${shellEscape(model)} -p ${shellEscape(prompt)}`,
+      command: `agent --print --output-format stream-json --model ${shellEscape(model)} ${forceFlag}${resumeFlag} ${shellEscape(prompt)}`,
     };
   },
 
@@ -301,18 +386,14 @@ export const cursor = (
     prompt,
     dangerouslySkipPermissions,
   }: AgentCommandOptions): string[] {
-    const args = [
-      "agent",
-      dangerouslySkipPermissions ? "--yolo" : "--trust",
-      "--model",
-      model,
-    ];
+    const args = ["agent", "--model", model];
+    if (dangerouslySkipPermissions) args.push("--force");
     if (prompt) args.push(prompt);
     return args;
   },
 
   parseStreamLine(line: string): ParsedStreamEvent[] {
-    return parseStreamJsonLine(line);
+    return parseCursorStreamLine(line);
   },
 });
 
