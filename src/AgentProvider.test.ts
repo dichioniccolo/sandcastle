@@ -687,6 +687,22 @@ describe("cursor factory", () => {
     ]);
   });
 
+  it("parseStreamLine extracts top-level tool_call writeToolCall (Cursor stream-json)", () => {
+    const provider = cursor("claude-sonnet-4-6");
+    const line = JSON.stringify({
+      type: "tool_call",
+      subtype: "started",
+      call_id: "toolu_vrtx_02",
+      tool_call: {
+        writeToolCall: { args: { path: "src/index.ts" } },
+      },
+      session_id: "c6b62c6f-7ead-4fd6-9922-e952131177ff",
+    });
+    expect(provider.parseStreamLine(line)).toEqual([
+      { type: "tool_call", name: "Write", args: "src/index.ts" },
+    ]);
+  });
+
   it("parseStreamLine ignores tool_call completed events", () => {
     const provider = cursor("claude-sonnet-4-6");
     const line = JSON.stringify({
@@ -851,15 +867,14 @@ describe("resumeSession on non-Claude providers", () => {
     expect(command).not.toContain("abc-123");
   });
 
-  it("cursor ignores resumeSession in buildPrintCommand", () => {
+  it("cursor includes --resume in buildPrintCommand when resumeSession is set", () => {
     const provider = cursor("claude-sonnet-4-6");
     const { command } = provider.buildPrintCommand({
       prompt: "test",
       dangerouslySkipPermissions: true,
       resumeSession: "abc-123",
     });
-    expect(command).not.toContain("--resume");
-    expect(command).not.toContain("abc-123");
+    expect(command).toContain("--resume 'abc-123'");
   });
 });
 
