@@ -607,7 +607,10 @@ import { z } from "zod";
 const result = await run({
   agent: claudeCode("claude-opus-4-6"),
   sandbox: docker(),
-  prompt: "Analyze the code and emit your findings inside <result> tags as JSON.",
+  prompt: `Analyze the code, and output the result as JSON inside <result> tags.
+    The result must match this schema:
+    { summary: string; score: string }
+  `,
   output: Output.object({
     tag: "result",
     schema: z.object({ summary: z.string(), score: z.number() }),
@@ -714,7 +717,7 @@ Removes the Podman image.
 | `resumeSession`      | string             | —                             | Resume a prior Claude Code session by ID. Incompatible with `maxIterations > 1`. Session file must exist on host.                                               |
 | `signal`             | AbortSignal        | —                             | Cancel the run when aborted. Kills the in-flight agent subprocess and cancels lifecycle hooks; the worktree is preserved on disk. Rejects with `signal.reason`. |
 | `timeouts`           | Timeouts           | —                             | Override default timeouts for built-in lifecycle steps. Currently supports `{ copyToWorktreeMs?: number }` (default: 60 000).                                   |
-| `output`             | OutputDefinition   | —                             | Structured output definition (`Output.object(…)` or `Output.string(…)`). Requires `maxIterations === 1`. See [Structured output](#structured-output).          |
+| `output`             | OutputDefinition   | —                             | Structured output definition (`Output.object(…)` or `Output.string(…)`). Requires `maxIterations === 1`. See [Structured output](#structured-output).           |
 
 ### `RunResult`
 
