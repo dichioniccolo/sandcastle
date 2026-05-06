@@ -145,6 +145,7 @@ describe("WorktreeDockerSandboxFactory", () => {
 
     expect(mockCreate).toHaveBeenCalledWith(hostRepoDir, {
       branch: "feature/my-branch",
+      baseBranch: undefined,
     });
   });
 
@@ -992,7 +993,8 @@ describe("WorktreeDockerSandboxFactory — isolated providers", () => {
             );
             commitMade = true;
             // Caller (lifecycle) is responsible for calling applyToHost
-            if (!info.applyToHost) throw new Error("applyToHost not provided for isolated sandbox");
+            if (!info.applyToHost)
+              throw new Error("applyToHost not provided for isolated sandbox");
             yield* info.applyToHost();
           }),
         );

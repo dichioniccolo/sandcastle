@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { type DisplayEntry, SilentDisplay } from "./Display.js";
 import {
   substitutePromptArgs,
+  validateNoArgsWithInlinePrompt,
   validateNoBuiltInArgOverride,
   findMissingPromptArgKeys,
   BUILT_IN_PROMPT_ARG_KEYS,
@@ -108,7 +109,9 @@ describe("PromptArgumentSubstitution", () => {
       { NUM: 123 },
       layer,
     );
-    expect(result).toBe("Output: !`gh issue view 123`");
+    // Template-authored shell blocks are marked with \x01 so the preprocessor
+    // can distinguish them from `!`...`` patterns injected via arg values.
+    expect(result).toBe("Output: !\x01`gh issue view 123`");
   });
 
   it("replaces {{ KEY }} with spaces inside braces", async () => {
@@ -238,6 +241,32 @@ describe("validateNoBuiltInArgOverride", () => {
     expect(error).toBeInstanceOf(PromptError);
     expect(error.message).toContain("TARGET_BRANCH");
     expect(error.message).toContain("built-in");
+  });
+});
+
+describe("validateNoArgsWithInlinePrompt", () => {
+  it("succeeds when promptArgs is empty", async () => {
+    await expect(
+      Effect.runPromise(validateNoArgsWithInlinePrompt({})),
+    ).resolves.toBeUndefined();
+  });
+
+  it("fails with PromptError when promptArgs has any key", async () => {
+    const error = await Effect.runPromise(
+      validateNoArgsWithInlinePrompt({ ISSUE: "42" }).pipe(Effect.flip),
+    );
+    expect(error).toBeInstanceOf(PromptError);
+    expect(error.message).toContain("promptArgs");
+    expect(error.message).toContain("promptFile");
+  });
+
+  it("fails even when only a built-in arg key is present", async () => {
+    const error = await Effect.runPromise(
+      validateNoArgsWithInlinePrompt({ SOURCE_BRANCH: "main" }).pipe(
+        Effect.flip,
+      ),
+    );
+    expect(error).toBeInstanceOf(PromptError);
   });
 });
 

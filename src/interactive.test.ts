@@ -383,6 +383,8 @@ describe("interactive()", () => {
   });
 
   it("substitutes {{KEY}} placeholders in prompts", async () => {
+    const promptPath = join(hostDir, "substitute-prompt.md");
+    writeFileSync(promptPath, "Fix bug in {{COMPONENT}}");
     const receivedArgs: string[] = [];
 
     const provider = makeTestProvider(async (args, _opts) => {
@@ -393,7 +395,7 @@ describe("interactive()", () => {
     await interactive({
       agent: claudeCode("claude-opus-4-6"),
       sandbox: provider,
-      prompt: "Fix bug in {{COMPONENT}}",
+      promptFile: promptPath,
       promptArgs: { COMPONENT: "LoginForm" },
     });
 
@@ -404,6 +406,8 @@ describe("interactive()", () => {
   });
 
   it("substitutes built-in SOURCE_BRANCH and TARGET_BRANCH args", async () => {
+    const promptPath = join(hostDir, "builtin-prompt.md");
+    writeFileSync(promptPath, "Branch is {{TARGET_BRANCH}}");
     const receivedArgs: string[] = [];
 
     const provider = makeTestProvider(async (args, _opts) => {
@@ -420,7 +424,7 @@ describe("interactive()", () => {
     await interactive({
       agent: claudeCode("claude-opus-4-6"),
       sandbox: provider,
-      prompt: "Branch is {{TARGET_BRANCH}}",
+      promptFile: promptPath,
     });
 
     const promptArg = receivedArgs[receivedArgs.length - 1]!;
@@ -429,6 +433,11 @@ describe("interactive()", () => {
   });
 
   it("expands shell expressions (!`command`) inside sandbox", async () => {
+    const promptPath = join(hostDir, "shell-prompt.md");
+    writeFileSync(
+      promptPath,
+      "Current branch: !`git rev-parse --abbrev-ref HEAD`",
+    );
     const receivedArgs: string[] = [];
 
     const provider = makeTestProvider(async (args, _opts) => {
@@ -439,7 +448,7 @@ describe("interactive()", () => {
     await interactive({
       agent: claudeCode("claude-opus-4-6"),
       sandbox: provider,
-      prompt: "Current branch: !`git rev-parse --abbrev-ref HEAD`",
+      promptFile: promptPath,
     });
 
     // The shell expression should be expanded to the actual branch name
@@ -450,13 +459,15 @@ describe("interactive()", () => {
   });
 
   it("throws when built-in prompt arg is overridden", async () => {
+    const promptPath = join(hostDir, "builtin-override-prompt.md");
+    writeFileSync(promptPath, "test {{SOURCE_BRANCH}}");
     const provider = makeTestProvider(async () => ({ exitCode: 0 }));
 
     await expect(
       interactive({
         agent: claudeCode("claude-opus-4-6"),
         sandbox: provider,
-        prompt: "test",
+        promptFile: promptPath,
         promptArgs: { SOURCE_BRANCH: "custom" },
       }),
     ).rejects.toThrow("SOURCE_BRANCH");

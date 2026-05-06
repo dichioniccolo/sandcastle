@@ -14,6 +14,7 @@ import {
 import {
   orchestrate,
   type IterationResult,
+  type IterationUsage,
   type OrchestrateResult,
 } from "./Orchestrator.js";
 import { resolvePrompt } from "./PromptResolver.js";
@@ -25,6 +26,11 @@ import type { SandboxProvider, BranchStrategy } from "./SandboxProvider.js";
 import { resolveEnv } from "./EnvResolver.js";
 import { formatErrorMessage } from "./ErrorHandler.js";
 import type { SandboxError } from "./errors.js";
+import {
+  callbackAgentStreamEmitterLayer,
+  noopAgentStreamEmitterLayer,
+  type AgentStreamEvent,
+} from "./AgentStreamEmitter.js";
 import type { SandboxHooks } from "./SandboxLifecycle.js";
 import { mergeProviderEnv } from "./mergeProviderEnv.js";
 import { hostSessionStore } from "./SessionStore.js";
@@ -33,9 +39,16 @@ import { generateTempBranchName, getCurrentBranch } from "./WorktreeManager.js";
 import {
   type PromptArgs,
   substitutePromptArgs,
+  validateNoArgsWithInlinePrompt,
   validateNoBuiltInArgOverride,
   BUILT_IN_PROMPT_ARG_KEYS,
 } from "./PromptArgumentSubstitution.js";
+import type {
+  OutputDefinition,
+  OutputObjectDefinition,
+  OutputStringDefinition,
+} from "./Output.js";
+import { extractStructuredOutput } from "./extractStructuredOutput.js";
 
 /** Default maximum number of iterations for a run. */
 export const DEFAULT_MAX_ITERATIONS = 1;
@@ -140,15 +153,56 @@ export const buildCompletionMessage = (
 };
 
 /**
+ * Format the context window size from an iteration's usage data.
+ * Returns a string like "103k" representing the total input-side tokens
+ * (inputTokens + cacheCreationInputTokens + cacheReadInputTokens)
+ * rounded up to the nearest 1000.
+ */
+export const formatContextWindowSize = (usage: IterationUsage): string => {
+  const total =
+    usage.inputTokens +
+    usage.cacheCreationInputTokens +
+    usage.cacheReadInputTokens;
+  return `${Math.ceil(total / 1000)}k`;
+};
+
+/**
+ * Build "Context window: NNNk" lines for iterations that have usage data.
+ * Returns an empty array when no iterations carry usage.
+ */
+export const buildContextWindowLines = (
+  iterations: readonly Pick<IterationResult, "usage">[],
+): string[] =>
+  iterations
+    .filter((it): it is { usage: IterationUsage } => it.usage !== undefined)
+    .map((it) => `Context window: ${formatContextWindowSize(it.usage)}`);
+
+/**
  * Controls where Sandcastle writes iteration progress and agent output.
  * Use `"file"` (log-to-file mode) to write to a log file on disk, or
  * `"stdout"` (terminal mode) to render an interactive UI in the terminal.
  */
 export type LoggingOption =
   /** Write progress and agent output to a log file at the given path (log-to-file mode). */
-  | { readonly type: "file"; readonly path: string }
+  | {
+      readonly type: "file";
+      readonly path: string;
+      /**
+       * Optional callback invoked for each agent stream event (text chunk or
+       * tool call) in addition to being written to the log file. Intended for
+       * forwarding the agent's output stream to external observability
+       * systems. Errors thrown by the callback are swallowed.
+       */
+      readonly onAgentStreamEvent?: (event: AgentStreamEvent) => void;
+    }
   /** Render progress and agent output as an interactive UI in the terminal (terminal mode). */
   | { readonly type: "stdout" };
+
+/** Override default timeouts for built-in lifecycle steps. Unset keys keep their defaults. */
+export interface Timeouts {
+  /** Timeout (ms) for the host-side copy of `copyToWorktree` paths into the worktree. Default: 60_000. */
+  readonly copyToWorktreeMs?: number;
+}
 
 export interface RunOptions {
   /** Agent provider to use (e.g. claudeCode("claude-opus-4-6")) */
@@ -208,6 +262,23 @@ export interface RunOptions {
    * - The worktree is preserved on disk after abort (error-path behavior).
    */
   readonly signal?: AbortSignal;
+  /** Override default timeouts for built-in lifecycle steps. Unset keys keep their defaults. */
+  readonly timeouts?: Timeouts;
+  /**
+   * Structured output definition. When provided, the agent's stdout is
+   * scanned for the configured XML tag after the iteration completes, and the
+   * result is parsed/validated and returned on `RunResult.output`.
+   *
+   * Use `Output.object({ tag, schema })` for JSON+schema or
+   * `Output.string({ tag })` for raw string extraction.
+   *
+   * Constraints:
+   * - `maxIterations` must be `1` (the default).
+   * - The resolved prompt must contain the configured opening tag literal.
+   *
+   * See ADR 0010 for design rationale.
+   */
+  readonly output?: OutputDefinition;
 }
 
 export type { IterationResult, IterationUsage } from "./Orchestrator.js";
@@ -229,7 +300,17 @@ export interface RunResult {
   readonly preservedWorktreePath?: string;
 }
 
-export const run = async (options: RunOptions): Promise<RunResult> => {
+/** Overload: with `Output.object`, returns `RunResult` with typed `output: T`. */
+export function run<T>(
+  options: RunOptions & { output: OutputObjectDefinition<T> },
+): Promise<RunResult & { output: T }>;
+/** Overload: with `Output.string`, returns `RunResult` with `output: string`. */
+export function run(
+  options: RunOptions & { output: OutputStringDefinition },
+): Promise<RunResult & { output: string }>;
+/** Overload: without `output`, returns the standard `RunResult`. */
+export function run(options: RunOptions): Promise<RunResult>;
+export async function run(options: RunOptions): Promise<RunResult & { output?: unknown }> {
   // If signal is already aborted, reject immediately without any setup
   options.signal?.throwIfAborted();
 
@@ -276,6 +357,14 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
     );
   }
 
+  // Validate: output requires maxIterations === 1
+  if (options.output && maxIterations !== 1) {
+    throw new Error(
+      "output requires maxIterations to be 1. " +
+        "Structured output is only supported for single-iteration runs.",
+    );
+  }
+
   // Extract explicit branch when in branch mode
   const branch: string | undefined =
     branchStrategy.type === "branch" ? branchStrategy.branch : undefined;
@@ -296,11 +385,24 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
   }
 
   // Resolve prompt
-  const rawPrompt = await Effect.runPromise(
+  const resolved = await Effect.runPromise(
     resolvePrompt({ prompt, promptFile }).pipe(
       Effect.provide(NodeContext.layer),
     ),
   );
+  const rawPrompt = resolved.text;
+  const isInlinePrompt = resolved.source === "inline";
+
+  // Validate: output tag must appear in the resolved prompt
+  if (options.output) {
+    const openTag = `<${options.output.tag}>`;
+    if (!rawPrompt.includes(openTag)) {
+      throw new Error(
+        `output tag <${options.output.tag}> not found in the resolved prompt. ` +
+          "The caller must instruct the agent to emit the configured tag.",
+      );
+    }
+  }
 
   const agentName = provider.name;
 
@@ -370,16 +472,23 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
         branchStrategy,
         hooks,
         signal: options.signal,
+        timeouts: options.timeouts,
       }),
       NodeFileSystem.layer,
       displayLayer,
     ),
   );
 
+  const agentStreamEmitterLayer =
+    resolvedLogging.type === "file" && resolvedLogging.onAgentStreamEvent
+      ? callbackAgentStreamEmitterLayer(resolvedLogging.onAgentStreamEvent)
+      : noopAgentStreamEmitterLayer;
+
   const runLayer = Layer.mergeAll(
     factoryLayer,
     displayLayer,
     defaultSessionPathsLayer,
+    agentStreamEmitterLayer,
   );
 
   const baseEffect = Effect.gen(function* () {
@@ -394,24 +503,28 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
     });
     yield* d.summary("Sandcastle Run", rows);
 
-    // Validate that the user has not provided built-in prompt argument keys
     const userArgs = options.promptArgs ?? {};
-    yield* validateNoBuiltInArgOverride(userArgs);
 
-    // Build effective args: built-in args merged with user-provided args.
-    // In none mode, resolvedBranch is already currentHostBranch, so
-    // SOURCE_BRANCH and TARGET_BRANCH both resolve to the host's current branch.
-    const effectiveArgs = {
-      SOURCE_BRANCH: resolvedBranch,
-      TARGET_BRANCH: currentHostBranch,
-      ...userArgs,
-    };
-    const builtInArgKeysSet = new Set<string>(BUILT_IN_PROMPT_ARG_KEYS);
-    const resolvedPrompt = yield* substitutePromptArgs(
-      rawPrompt,
-      effectiveArgs,
-      builtInArgKeysSet,
-    );
+    // Inline prompts pass through to the agent literally — no substitution,
+    // no built-in arg injection. Guard against silently ignoring promptArgs.
+    let resolvedPrompt: string;
+    if (isInlinePrompt) {
+      yield* validateNoArgsWithInlinePrompt(userArgs);
+      resolvedPrompt = rawPrompt;
+    } else {
+      yield* validateNoBuiltInArgOverride(userArgs);
+      const effectiveArgs = {
+        SOURCE_BRANCH: resolvedBranch,
+        TARGET_BRANCH: currentHostBranch,
+        ...userArgs,
+      };
+      const builtInArgKeysSet = new Set<string>(BUILT_IN_PROMPT_ARG_KEYS);
+      resolvedPrompt = yield* substitutePromptArgs(
+        rawPrompt,
+        effectiveArgs,
+        builtInArgKeysSet,
+      );
+    }
 
     // In head mode, pass the host branch so SandboxLifecycle skips the merge step.
     // In merge-to-head mode, branch is undefined (triggers merge). In branch mode, it's the explicit branch.
@@ -430,6 +543,7 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
       name: options.name,
       resumeSession: options.resumeSession,
       signal: options.signal,
+      skipPromptExpansion: isInlinePrompt,
     });
 
     const completion = buildCompletionMessage(
@@ -437,6 +551,10 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
       orchestrateResult.iterations.length,
     );
     yield* d.status(completion.message, completion.severity);
+
+    for (const line of buildContextWindowLines(orchestrateResult.iterations)) {
+      yield* d.text(line);
+    }
 
     return orchestrateResult;
   });
@@ -470,9 +588,25 @@ export const run = async (options: RunOptions): Promise<RunResult> => {
     throw error;
   }
 
-  return {
+  const baseResult = {
     ...result,
     logFilePath:
       resolvedLogging.type === "file" ? resolvedLogging.path : undefined,
   };
-};
+
+  // Extract structured output after the iteration completes (separate pass from completion signal)
+  if (options.output) {
+    const output = await extractStructuredOutput(
+      baseResult.stdout,
+      options.output,
+      {
+        commits: baseResult.commits,
+        branch: baseResult.branch,
+        preservedWorktreePath: baseResult.preservedWorktreePath,
+      },
+    );
+    return { ...baseResult, output };
+  }
+
+  return baseResult;
+}

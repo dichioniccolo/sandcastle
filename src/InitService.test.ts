@@ -456,7 +456,7 @@ describe("InitService scaffold", () => {
       expect(mainTs).toContain('"@ai-hero/sandcastle"');
     });
 
-    it("main.mts calls sandcastle.run() twice per iteration (implement + review)", async () => {
+    it("main.mts uses createSandbox so implementer and reviewer share a sandbox", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { templateName: "sequential-reviewer" });
 
@@ -464,14 +464,14 @@ describe("InitService scaffold", () => {
         join(dir, ".sandcastle", "main.mts"),
         "utf-8",
       );
-      expect(mainTs).toContain("sandcastle");
-      const runCallCount = (mainTs.match(/\.run\(/g) ?? []).length;
-      expect(runCallCount).toBeGreaterThanOrEqual(2);
+      expect(mainTs).toContain("createSandbox");
+      expect(mainTs).toContain("sandbox.run");
+      expect(mainTs).toContain("sandbox.close");
       expect(mainTs).toContain("implement-prompt.md");
       expect(mainTs).toContain("review-prompt.md");
     });
 
-    it("main.mts passes branch from implement result to review run", async () => {
+    it("main.mts does not use merge-to-head (incompatible with reviewer handoff)", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { templateName: "sequential-reviewer" });
 
@@ -479,7 +479,18 @@ describe("InitService scaffold", () => {
         join(dir, ".sandcastle", "main.mts"),
         "utf-8",
       );
-      expect(mainTs).toContain("branch");
+      expect(mainTs).not.toContain("merge-to-head");
+    });
+
+    it("main.mts only reviews when implementer produces commits", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "sequential-reviewer" });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      expect(mainTs).toContain("implement.commits.length");
     });
 
     it("implement-prompt.md contains issue selection and closure, not prompt argument placeholders", async () => {
@@ -537,6 +548,20 @@ describe("InitService scaffold", () => {
         "utf-8",
       );
       expect(prompt).toContain("@.sandcastle/CODING_STANDARDS.md");
+    });
+
+    it("review-prompt.md uses {{SOURCE_BRANCH}} instead of hardcoded main", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "sequential-reviewer" });
+
+      const prompt = await readFile(
+        join(dir, ".sandcastle", "review-prompt.md"),
+        "utf-8",
+      );
+      expect(prompt).toContain("git diff {{SOURCE_BRANCH}}...{{BRANCH}}");
+      expect(prompt).toContain("git log {{SOURCE_BRANCH}}..{{BRANCH}}");
+      expect(prompt).not.toContain("git diff main");
+      expect(prompt).not.toContain("git log main");
     });
   });
 
@@ -790,6 +815,26 @@ describe("InitService scaffold", () => {
     expect(prompt).toContain("gh issue list");
   });
 
+  it("scaffolded prompts that lack a runtime TASK_ID do not contain {{TASK_ID}}", async () => {
+    // Regression test for #477: the {{TASK_ID}} placeholder inside
+    // VIEW_TASK_COMMAND / CLOSE_TASK_COMMAND used to leak into prompts
+    // whose runtime promptArgs do not include TASK_ID (simple-loop,
+    // sequential-reviewer's implement, parallel-planner*'s merge),
+    // causing PromptArgumentSubstitution to throw on every iteration.
+    const cases: Array<{ template: string; file: string }> = [
+      { template: "simple-loop", file: "prompt.md" },
+      { template: "sequential-reviewer", file: "implement-prompt.md" },
+      { template: "parallel-planner", file: "merge-prompt.md" },
+      { template: "parallel-planner-with-review", file: "merge-prompt.md" },
+    ];
+    for (const { template, file } of cases) {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: template });
+      const prompt = await readFile(join(dir, ".sandcastle", file), "utf-8");
+      expect(prompt, `${template}/${file}`).not.toContain("{{TASK_ID}}");
+    }
+  });
+
   it("createLabel defaults to true (label retained when not specified)", async () => {
     const dir = await makeDir();
     await runScaffold(dir, { templateName: "simple-loop" });
@@ -982,6 +1027,21 @@ describe("InitService scaffold", () => {
       expect(mainTs).toContain("implement.commits.length > 0");
     });
 
+    it("main.mts captures reviewer result and merges commits from both runs", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "parallel-planner-with-review" });
+
+      const mainTs = await readFile(
+        join(dir, ".sandcastle", "main.mts"),
+        "utf-8",
+      );
+      // Reviewer result must be captured, not discarded
+      expect(mainTs).toContain("const review = await sandbox.run");
+      // Commits from both implementer and reviewer must be merged
+      expect(mainTs).toContain("implement.commits");
+      expect(mainTs).toContain("review.commits");
+    });
+
     it("main.mts uses Promise.allSettled for parallel execution", async () => {
       const dir = await makeDir();
       await runScaffold(dir, { templateName: "parallel-planner-with-review" });
@@ -1124,6 +1184,20 @@ describe("InitService scaffold", () => {
       );
       expect(prompt).toContain("@.sandcastle/CODING_STANDARDS.md");
     });
+
+    it("review-prompt.md uses {{SOURCE_BRANCH}} instead of hardcoded main", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "parallel-planner-with-review" });
+
+      const prompt = await readFile(
+        join(dir, ".sandcastle", "review-prompt.md"),
+        "utf-8",
+      );
+      expect(prompt).toContain("git diff {{SOURCE_BRANCH}}...{{BRANCH}}");
+      expect(prompt).toContain("git log {{SOURCE_BRANCH}}..{{BRANCH}}");
+      expect(prompt).not.toContain("git diff main");
+      expect(prompt).not.toContain("git log main");
+    });
   });
 
   // --- Backlog manager ---
@@ -1169,6 +1243,12 @@ describe("InitService scaffold", () => {
         "corepack enable",
       );
       expect(manager!.templateArgs.BACKLOG_MANAGER_TOOLS).not.toContain("gh");
+      expect(manager!.templateArgs.BACKLOG_MANAGER_TOOLS).not.toContain(
+        "x86_64-linux-gnu",
+      );
+      expect(manager!.templateArgs.BACKLOG_MANAGER_TOOLS).toContain(
+        "dpkg-architecture -qDEB_HOST_MULTIARCH",
+      );
     });
 
     it("getBacklogManager returns undefined for unknown manager", () => {
@@ -1209,7 +1289,8 @@ describe("InitService scaffold", () => {
       );
       expect(prompt).toContain("bd ready --json");
       expect(prompt).toContain("bd close");
-      expect(prompt).not.toContain("gh issue");
+      expect(prompt).not.toContain("gh issue list");
+      expect(prompt).not.toContain("gh issue close");
       expect(prompt).not.toContain("{{LIST_TASKS_COMMAND}}");
       expect(prompt).not.toContain("{{CLOSE_TASK_COMMAND}}");
     });
@@ -1272,6 +1353,17 @@ describe("InitService scaffold", () => {
       expect(prompt).not.toContain("{{LIST_TASKS_COMMAND}}");
     });
 
+    it("simple-loop prompt uses backlog-agnostic language", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "simple-loop" });
+
+      const prompt = await readFile(
+        join(dir, ".sandcastle", "prompt.md"),
+        "utf-8",
+      );
+      expect(prompt).not.toContain("GitHub issue");
+    });
+
     // --- sequential-reviewer ---
 
     it("sequential-reviewer with github-issues produces implement-prompt with gh issue commands", async () => {
@@ -1306,9 +1398,21 @@ describe("InitService scaffold", () => {
       );
       expect(prompt).toContain("bd ready --json");
       expect(prompt).toContain("bd close");
-      expect(prompt).not.toContain("gh issue");
+      expect(prompt).not.toContain("gh issue list");
+      expect(prompt).not.toContain("gh issue close");
       expect(prompt).not.toContain("{{LIST_TASKS_COMMAND}}");
       expect(prompt).not.toContain("{{CLOSE_TASK_COMMAND}}");
+    });
+
+    it("sequential-reviewer implement-prompt uses backlog-agnostic language", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "sequential-reviewer" });
+
+      const prompt = await readFile(
+        join(dir, ".sandcastle", "implement-prompt.md"),
+        "utf-8",
+      );
+      expect(prompt).not.toContain("GitHub issue");
     });
 
     // --- blank ---
@@ -1472,6 +1576,18 @@ describe("InitService scaffold", () => {
       expect(prompt).not.toContain("{{CLOSE_TASK_COMMAND}}");
     });
 
+    it("parallel-planner implement-prompt does not contain close-issue instruction", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, { templateName: "parallel-planner" });
+
+      const prompt = await readFile(
+        join(dir, ".sandcastle", "implement-prompt.md"),
+        "utf-8",
+      );
+      expect(prompt).not.toContain("close the issue when done");
+      expect(prompt).not.toContain("{{CLOSE_TASK_COMMAND}}");
+    });
+
     it("parallel-planner implement-prompt uses backlog-agnostic language", async () => {
       const dir = await makeDir();
       await runScaffold(dir, {
@@ -1535,6 +1651,20 @@ describe("InitService scaffold", () => {
       expect(main).not.toContain("number: number");
       expect(main).not.toContain("ISSUE_NUMBER");
       expect(main).not.toContain("`  #${");
+    });
+
+    it("parallel-planner-with-review implement-prompt does not contain close-issue instruction", async () => {
+      const dir = await makeDir();
+      await runScaffold(dir, {
+        templateName: "parallel-planner-with-review",
+      });
+
+      const prompt = await readFile(
+        join(dir, ".sandcastle", "implement-prompt.md"),
+        "utf-8",
+      );
+      expect(prompt).not.toContain("close the issue when done");
+      expect(prompt).not.toContain("{{CLOSE_TASK_COMMAND}}");
     });
 
     it("parallel-planner-with-review implement-prompt uses TASK_ID placeholder", async () => {
@@ -1658,6 +1788,8 @@ describe("InitService scaffold", () => {
       expect(dockerfile).toContain("corepack enable");
       expect(dockerfile).not.toContain("GitHub CLI");
       expect(dockerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+      expect(dockerfile).not.toContain("x86_64-linux-gnu");
+      expect(dockerfile).toContain("dpkg-architecture -qDEB_HOST_MULTIARCH");
     });
 
     it("scaffold with beads + podman produces Containerfile with beads install", async () => {
@@ -1676,6 +1808,8 @@ describe("InitService scaffold", () => {
       expect(containerfile).toContain("libicu72");
       expect(containerfile).not.toContain("GitHub CLI");
       expect(containerfile).not.toContain("{{BACKLOG_MANAGER_TOOLS}}");
+      expect(containerfile).not.toContain("x86_64-linux-gnu");
+      expect(containerfile).toContain("dpkg-architecture -qDEB_HOST_MULTIARCH");
     });
 
     it("scaffold with beads + pi agent produces Dockerfile with beads install and pi agent", async () => {

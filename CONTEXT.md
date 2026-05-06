@@ -78,6 +78,10 @@ _Avoid_: "agent adapter", "agent driver"
 
 ### Execution
 
+**Agent invoker**:
+The Effect service (`Context.Tag`) that wraps the raw call handing a fully-resolved **prompt** to the **agent provider** for one **iteration**. The seam used to substitute a recording or scripted fake in tests without running a real **agent**.
+_Avoid_: "agent runner", "agent caller"
+
 **Iteration**:
 A single invocation of the **agent** inside the **sandbox**, producing at most one commit against one **task**.
 _Avoid_: "run" (ambiguous with the JS `run()` function), "cycle", "loop"
@@ -87,14 +91,30 @@ A work item from the **backlog manager** that the **agent** selects and works on
 _Avoid_: "job", "work item", "ticket"
 
 **Completion signal**:
-The `<promise>COMPLETE</promise>` marker in the **agent**'s output indicating all actionable tasks are finished.
-_Avoid_: "done flag", "exit signal"
+The `<promise>COMPLETE</promise>` marker in the **agent**'s output indicating all actionable tasks are finished. A pure termination signal -- carries no payload. Distinct from **structured output**.
+_Avoid_: "done flag", "exit signal", conflating with **structured output**
+
+**Structured output**:
+A schema-validated JSON payload emitted by the **agent** inside a caller-specified XML tag and returned to the caller of `run()`. Configured via `output: Output.object({ tag, schema })`. Orthogonal to the **completion signal** -- a run can use either, both, or neither. The caller owns the prompt-side instruction telling the agent to emit the tag; Sandcastle does not inject it, and `run()` errors early if the resolved prompt does not contain the configured tag.
+_Avoid_: "output payload", "result", "JSON output"
+
+**Output schema**:
+The Standard Schema validator (e.g. Zod, Valibot) the caller passes alongside the XML tag name to parse and validate **structured output**.
+_Avoid_: "validator", "result schema"
 
 ### Prompts
 
 **Prompt**:
 The instruction text passed to the **agent** at the start of each **iteration**.
 _Avoid_: "system prompt" (too specific), "instructions" (too vague), "message"
+
+**Inline prompt**:
+A **prompt** provided as a string via the `prompt` option. Passed through to the **agent** as-is — no **prompt argument substitution**, no **prompt expansion**.
+_Avoid_: "dynamic prompt", "string prompt"
+
+**Prompt template**:
+A **prompt** sourced from a file via the `promptFile` option. May contain `{{KEY}}` placeholders and `` !`command` `` **shell expressions**, which are resolved via **prompt argument substitution** and **prompt expansion** before being passed to the **agent**.
+_Avoid_: "prompt file" (refers to the option, not the concept), "template prompt"
 
 **Prompt argument**:
 A runtime **template argument** passed via `promptArgs` in `run()` that substitutes a `{{KEY}}` placeholder in a **prompt**.
@@ -159,7 +179,7 @@ A provider-namespaced CLI command that removes the image (e.g. `sandcastle docke
 _Avoid_: "cleanup-sandbox" (old name)
 
 **Agent session**:
-The **agent**'s persisted conversation record. For Claude Code, a `<session-id>.jsonl` written per **iteration**. Resumable via `claude --resume`.
+The **agent**'s persisted conversation record. Storage shape and location are owned by the **agent provider** -- Claude Code writes a `<session-id>.jsonl` under `~/.claude/projects/<encoded-cwd>/`; other agents use their own conventions (e.g. `~/.codex/sessions/`, `~/.pi/agent/sessions/`, OpenCode's SQLite store). Resumable when the **agent provider** declares session-storage support; the resume mechanism is the agent's native flag (e.g. `claude --resume`, `codex exec resume`, `pi --session`).
 _Avoid_: "chat history", "transcript"
 
 ### Display
@@ -175,6 +195,10 @@ _Avoid_: "log file" (too generic), "output file"
 **Terminal mode**:
 The display mode where Sandcastle renders an interactive UI in the terminal with spinners and styled status messages.
 _Avoid_: "stdout mode", "interactive mode", "CLI mode" (ambiguous with the CLI itself)
+
+**Agent stream event**:
+A single item in the **agent**'s output stream -- either a `text` chunk or a `toolCall` -- surfaced to the caller of `run()` so the stream can be forwarded to an external observability system. Available only in **log-to-file mode** via the `onAgentStreamEvent` callback on the `logging` option. Each event carries its `iteration` number and a `timestamp`.
+_Avoid_: "log event" (the log file contains more than just agent output), "display entry" (internal UI type)
 
 ## Relationships
 
@@ -199,10 +223,12 @@ _Avoid_: "stdout mode", "interactive mode", "CLI mode" (ambiguous with the CLI i
 - **Build-image** and **remove-image** are namespaced under their provider in the CLI (e.g. `sandcastle docker build-image`)
 - The **agent provider** is selected via the `agent` field in config or `--agent` CLI flag
 - At launch, Sandcastle resolves env vars from **config directory** `.env` and `process.env`, then passes the full env map into the **sandbox**
+- **Inline prompts** bypass **prompt argument substitution** and **prompt expansion** entirely -- they are passed to the **agent** as-is. `promptArgs` cannot be combined with an **inline prompt**; doing so raises an error
+- **Prompt argument substitution** and **prompt expansion** only apply to **prompt templates** (prompts sourced via `promptFile`)
 - **Prompt argument substitution** runs once after prompt resolution, replacing `{{KEY}}` placeholders with values from **prompt arguments** -- this happens on the **host**, before the **sandbox** exists
 - **Prompt expansion** runs before each **iteration**, evaluating all **shell expressions** inside the **sandbox**
 - **Prompt argument substitution** runs before **prompt expansion**, so **prompt arguments** can inject values into **shell expressions**
-- A `{{KEY}}` placeholder with no matching **prompt argument** is an error in `run()` (AFK mode); in `interactive()`, Sandcastle prompts the user to fill in missing values
+- A `{{KEY}}` placeholder in a **prompt template** with no matching **prompt argument** is an error in `run()` (AFK mode); in `interactive()`, Sandcastle prompts the user to fill in missing values
 - Unused **prompt arguments** produce a warning
 - A **prompt** may contain zero or more **prompt arguments** and/or **shell expressions**; each substitution step is skipped if there are no matches
 - Sandcastle injects **built-in prompt arguments** `{{SOURCE_BRANCH}}` and `{{TARGET_BRANCH}}` automatically
@@ -212,6 +238,7 @@ _Avoid_: "stdout mode", "interactive mode", "CLI mode" (ambiguous with the CLI i
 - **Log-to-file mode** is the default for programmatic use via `run()`; **terminal mode** is used when passing `logging: { type: 'stdout' }` to `run()`
 - In **log-to-file mode**, Sandcastle writes a **run log** to `.sandcastle/logs/` and prints a `tail -f` command to the console
 - In **terminal mode**, Sandcastle renders spinners, styled status messages, and summaries directly in the terminal
+- In **log-to-file mode**, callers may pass an `onAgentStreamEvent` callback on the `logging` option to receive each **agent stream event** alongside the file log -- intended for forwarding the **agent**'s output to an external observability system. The callback is sync, fire-and-forget, and errors thrown by the callback are swallowed so a broken forwarder cannot kill the run
 
 ## Example dialogue
 

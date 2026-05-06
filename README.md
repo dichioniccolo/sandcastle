@@ -30,7 +30,7 @@ Sandcastle is provider-agnostic — it ships with built-in providers for Docker,
 1. Install the package:
 
 ```bash
-npm install @ai-hero/sandcastle
+npm install --save-dev @ai-hero/sandcastle
 ```
 
 2. Run `sandcastle init`. This scaffolds a `.sandcastle` directory with all the files needed.
@@ -135,6 +135,10 @@ const result = await run({
   // Provider-specific config (like imageName, mounts) lives inside the provider factory call.
   sandbox: docker({
     imageName: "sandcastle:local",
+    // Optional: override the UID/GID used for --user flag (defaults to host UID/GID).
+    // Must match the UID baked into the image. Pre-flight check catches mismatches.
+    // containerUid: 1000,
+    // containerGid: 1000,
     // Optional: mount host directories into the sandbox (e.g. package manager caches)
     // hostPath supports absolute, tilde-expanded (~), and relative paths (resolved from cwd).
     // sandboxPath supports absolute and relative paths (resolved from the sandbox repo directory).
@@ -188,8 +192,24 @@ const result = await run({
   // Not supported with branchStrategy: { type: "head" }.
   copyToWorktree: [".env"],
 
+  // Override default timeouts for built-in lifecycle steps.
+  // Unset keys keep their defaults.
+  timeouts: {
+    copyToWorktreeMs: 120_000, // default: 60_000
+  },
+
   // How to record progress. Default: write to a file under .sandcastle/logs/
-  logging: { type: "file", path: ".sandcastle/logs/my-run.log" },
+  logging: {
+    type: "file",
+    path: ".sandcastle/logs/my-run.log",
+    // Optional: forward the agent's output stream to your own observability system.
+    // Fires for each text chunk and tool call the agent produces. Errors thrown
+    // by the callback are swallowed so a broken forwarder cannot kill the run.
+    onAgentStreamEvent: (event) => {
+      // event is { type: "text" | "toolCall", iteration, timestamp, ... }
+      myLogger.info(event);
+    },
+  },
   // logging: { type: "stdout" }, // OR render an interactive UI in the terminal
 
   // String (or array of strings) the agent emits to end the iteration loop early.
@@ -198,6 +218,11 @@ const result = await run({
 
   // Idle timeout in seconds — resets whenever the agent produces output. Default: 600 (10 minutes)
   idleTimeoutSeconds: 600,
+
+  // Structured output — extract a typed payload from the agent's stdout.
+  // Requires maxIterations === 1 and the tag must appear in the prompt.
+  // output: Output.object({ tag: "result", schema: z.object({ answer: z.number() }) }),
+  // output: Output.string({ tag: "summary" }),
 });
 
 console.log(result.iterations.length); // number of iterations executed
@@ -286,6 +311,7 @@ if (closeResult.preservedWorktreePath) {
 | `cwd`            | string          | `process.cwd()` | Host repo directory — relative paths resolve against `process.cwd()` |
 | `hooks`          | SandboxHooks    | —               | Lifecycle hooks (`host.*`, `sandbox.*`) — run once at creation time  |
 | `copyToWorktree` | string[]        | —               | Host-relative file paths to copy into the sandbox at creation time   |
+| `timeouts`       | Timeouts        | —               | Override default timeouts (e.g. `{ copyToWorktreeMs: 120_000 }`)     |
 
 #### `Sandbox`
 
@@ -388,6 +414,7 @@ await sandbox.close();
 | ---------------- | ---------------------- | ------- | ------------------------------------------------------------------------- |
 | `branchStrategy` | WorktreeBranchStrategy | —       | **Required.** `{ type: "branch", branch }` or `{ type: "merge-to-head" }` |
 | `copyToWorktree` | string[]               | —       | Host-relative file paths to copy into the worktree at creation time       |
+| `timeouts`       | Timeouts               | —       | Override default timeouts (e.g. `{ copyToWorktreeMs: 120_000 }`)          |
 
 #### `Worktree`
 
@@ -452,6 +479,7 @@ await sandbox.close();
 | `sandbox`        | SandboxProvider | —       | **Required.** Sandbox provider (e.g. `docker()`)                    |
 | `hooks`          | SandboxHooks    | —       | Lifecycle hooks (`host.*`, `sandbox.*`)                             |
 | `copyToWorktree` | string[]        | —       | Host-relative file paths to copy into the worktree at creation time |
+| `timeouts`       | Timeouts        | —       | Override default timeouts (e.g. `{ copyToWorktreeMs: 120_000 }`)    |
 
 ## How it works
 
@@ -477,6 +505,10 @@ You must provide exactly one of:
 2. `promptFile: "./path/to/prompt.md"` — point to a specific file via `RunOptions`
 
 `prompt` and `promptFile` are mutually exclusive — providing both is an error. If neither is provided, `run()` throws an error asking you to supply one.
+
+**Inline prompts (`prompt: "..."`) are passed to the agent literally.** No `{{KEY}}` substitution, no `` !`command` `` expansion, no built-in `{{SOURCE_BRANCH}}` / `{{TARGET_BRANCH}}` injection. If you need values interpolated into an inline prompt, build the string in JavaScript (`` `Work on ${branch}…` ``). Passing `promptArgs` alongside an inline prompt is an error — switch to `promptFile` to use substitution.
+
+The substitution and expansion features below apply **only** to prompts sourced from `promptFile`.
 
 > **Convention**: `sandcastle init` scaffolds `.sandcastle/prompt.md` and all templates explicitly reference it via `promptFile: ".sandcastle/prompt.md"`. This is a convention, not an automatic fallback — Sandcastle does not read `.sandcastle/prompt.md` unless you pass it as `promptFile`.
 
@@ -525,6 +557,8 @@ Prompt argument substitution runs on the host before shell expression expansion,
 
 A `{{KEY}}` placeholder with no matching prompt argument is an error. Unused prompt arguments produce a warning.
 
+`` !`command` `` expansion only runs on shell blocks written in the prompt file itself. Any `` !`…` `` pattern that appears inside an argument value is treated as inert text — it won't be executed against the host shell. This makes it safe to pass user-authored content (issue titles, PR descriptions, docs excerpts) through `promptArgs`.
+
 ### Built-in prompt arguments
 
 Sandcastle automatically injects two built-in prompt arguments into every prompt:
@@ -565,6 +599,34 @@ await run({
 
 Tell the agent to output your chosen string(s) in the prompt, and the orchestrator will stop when it detects any of them. The matched signal is returned as `result.completionSignal`.
 
+### Structured output
+
+Use `Output.object()` to extract a typed, schema-validated JSON payload from the agent's stdout. The agent emits its answer inside an XML tag you specify, and Sandcastle parses, validates, and returns it on `result.output`. See [ADR 0010](docs/adr/0010-structured-output.md) for design rationale.
+
+```ts
+import { run, Output, claudeCode } from "@ai-hero/sandcastle";
+import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
+import { z } from "zod";
+
+const result = await run({
+  agent: claudeCode("claude-opus-4-6"),
+  sandbox: docker(),
+  prompt: `Analyze the code, and output the result as JSON inside <result> tags.
+    The result must match this schema:
+    { summary: string; score: string }
+  `,
+  output: Output.object({
+    tag: "result",
+    schema: z.object({ summary: z.string(), score: z.number() }),
+  }),
+});
+
+console.log(result.output.summary); // typed as string
+console.log(result.output.score); // typed as number
+```
+
+`Output.string({ tag })` extracts the tag contents as a plain string (trimmed, no JSON parsing). Both helpers require `maxIterations` to be `1` (the default). The resolved prompt must contain the configured opening tag literal.
+
 ### Templates
 
 `sandcastle init` prompts you to choose a sandbox provider (Docker or Podman), a backlog manager (GitHub Issues or Beads), and a template, which scaffolds a ready-to-use prompt and `main.mts` suited to a specific workflow. If your project's `package.json` has `"type": "module"`, the file will be named `main.ts` instead. Five templates are available:
@@ -572,7 +634,7 @@ Tell the agent to output your chosen string(s) in the prompt, and the orchestrat
 | Template                       | Description                                                               |
 | ------------------------------ | ------------------------------------------------------------------------- |
 | `blank`                        | Bare scaffold — write your own prompt and orchestration                   |
-| `simple-loop`                  | Picks GitHub issues one by one and closes them                            |
+| `simple-loop`                  | Picks issues one by one and closes them                                   |
 | `sequential-reviewer`          | Implements issues one by one, with a code review step after each          |
 | `parallel-planner`             | Plans parallelizable issues, executes on separate branches, then merges   |
 | `parallel-planner-with-review` | Plans parallelizable issues, executes with per-branch review, then merges |
@@ -606,7 +668,7 @@ Errors if `.sandcastle/` already exists to prevent overwriting customizations.
 
 ### `sandcastle docker build-image`
 
-Rebuilds the Docker image from an existing `.sandcastle/` directory. Use this after modifying the Dockerfile.
+Rebuilds the Docker image from an existing `.sandcastle/` directory. Use this after modifying the Dockerfile. On Linux/macOS, the build automatically passes `--build-arg AGENT_UID=$(id -u)` and `AGENT_GID=$(id -g)` so the image's `agent` user matches the host UID — this prevents permission errors on image-built files without runtime chown.
 
 | Option         | Required | Default                      | Description                                                                       |
 | -------------- | -------- | ---------------------------- | --------------------------------------------------------------------------------- |
@@ -658,6 +720,8 @@ Removes the Podman image.
 | `idleTimeoutSeconds` | number             | `600`                         | Idle timeout in seconds — resets on each agent output event                                                                                                     |
 | `resumeSession`      | string             | —                             | Resume a prior Claude Code session by ID. Incompatible with `maxIterations > 1`. Session file must exist on host.                                               |
 | `signal`             | AbortSignal        | —                             | Cancel the run when aborted. Kills the in-flight agent subprocess and cancels lifecycle hooks; the worktree is preserved on disk. Rejects with `signal.reason`. |
+| `timeouts`           | Timeouts           | —                             | Override default timeouts for built-in lifecycle steps. Currently supports `{ copyToWorktreeMs?: number }` (default: 60 000).                                   |
+| `output`             | OutputDefinition   | —                             | Structured output definition (`Output.object(…)` or `Output.string(…)`). Requires `maxIterations === 1`. See [Structured output](#structured-output).           |
 
 ### `RunResult`
 
@@ -669,6 +733,7 @@ Removes the Podman image.
 | `commits`          | `{ sha }[]`         | Commits created during the run                                     |
 | `branch`           | string              | Target branch name                                                 |
 | `logFilePath`      | string?             | Path to the log file (only when logging to a file)                 |
+| `output`           | T?                  | Typed structured output (only present when `output` option is set) |
 
 ### `IterationResult`
 
@@ -1108,7 +1173,7 @@ hooks: {
   },
   sandbox: {
     onSandboxReady: [
-      { command: "npm install" },
+      { command: "npm install", timeoutMs: 300_000 },
       { command: "apt-get install -y ffmpeg", sudo: true },
     ],
   },
@@ -1123,8 +1188,9 @@ hooks: {
 
 **Ordering:** `copyToWorktree` -> `host.onWorktreeReady` (sequential) -> sandbox created -> `host.onSandboxReady` + `sandbox.onSandboxReady` (parallel).
 
-- **Host hooks** accept `{ command: string }` — no `sudo`, no `cwd`. Use `cd` or inline env in the command string.
-- **Sandbox hooks** accept `{ command: string; sudo?: boolean }` — set `sudo: true` for elevated privileges.
+- **Host hooks** accept `{ command: string; timeoutMs?: number }` — no `sudo`, no `cwd`. Use `cd` or inline env in the command string.
+- **Sandbox hooks** accept `{ command: string; sudo?: boolean; timeoutMs?: number }` — set `sudo: true` for elevated privileges.
+- **`timeoutMs`** overrides the default 60 s per-hook timeout. Useful for long-running setup commands like dependency installs (e.g. `timeoutMs: 300_000` for 5 minutes).
 - Within each hook point, sandbox hooks run in parallel; host hooks within `onSandboxReady` also run in parallel with sandbox hooks. `host.onWorktreeReady` hooks run sequentially in declared order.
 - If any hook exits non-zero, setup fails fast.
 - When a `signal` is passed to `run()`, it is threaded to all hooks — aborting the signal cancels any in-flight hook commands.

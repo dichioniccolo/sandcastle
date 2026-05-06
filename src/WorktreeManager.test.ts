@@ -2,7 +2,14 @@ import { Effect } from "effect";
 import { FileSystem } from "@effect/platform";
 import { NodeFileSystem } from "@effect/platform-node";
 import { exec } from "node:child_process";
-import { mkdir, mkdtemp, readdir, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -243,6 +250,69 @@ describe("WorktreeManager.create", () => {
     await run(remove(path));
   });
 
+  it("creates a new branch from baseBranch when specified", async () => {
+    const repoDir = await setupRepo();
+
+    // Create a second commit on main so HEAD differs from the base
+    await commitFile(repoDir, "second.txt", "second", "second commit");
+
+    // Record the first commit's SHA (the one before "second commit")
+    const { stdout: baseSha } = await execAsync("git rev-parse HEAD~1", {
+      cwd: repoDir,
+    });
+
+    const { path, branch } = await run(
+      create(repoDir, {
+        branch: "feature/from-base",
+        baseBranch: baseSha.trim(),
+      }),
+    );
+
+    expect(branch).toBe("feature/from-base");
+    expect(await getBranch(path)).toBe("feature/from-base");
+
+    // The worktree should be at the base commit, not HEAD
+    const { stdout: worktreeHead } = await execAsync("git rev-parse HEAD", {
+      cwd: path,
+    });
+    expect(worktreeHead.trim()).toBe(baseSha.trim());
+
+    await run(remove(path));
+  });
+
+  it("ignores baseBranch when the branch already exists", async () => {
+    const repoDir = await setupRepo();
+
+    // Create a branch with a known commit
+    await execAsync("git checkout -b existing-branch", { cwd: repoDir });
+    await commitFile(repoDir, "on-branch.txt", "x", "branch commit");
+    const { stdout: branchHead } = await execAsync("git rev-parse HEAD", {
+      cwd: repoDir,
+    });
+    await execAsync("git checkout main", { cwd: repoDir });
+
+    // Add another commit on main to use as baseBranch
+    await commitFile(repoDir, "main2.txt", "y", "main commit 2");
+    const { stdout: mainHead } = await execAsync("git rev-parse HEAD", {
+      cwd: repoDir,
+    });
+
+    // baseBranch should be ignored since existing-branch already exists
+    const { path } = await run(
+      create(repoDir, {
+        branch: "existing-branch",
+        baseBranch: mainHead.trim(),
+      }),
+    );
+
+    const { stdout: worktreeHead } = await execAsync("git rev-parse HEAD", {
+      cwd: path,
+    });
+    expect(worktreeHead.trim()).toBe(branchHead.trim());
+
+    await run(remove(path));
+  });
+
   it("reuses worktree with unpushed commits (not considered dirty)", async () => {
     const repoDir = await setupRepo();
     await execAsync("git checkout -b my-branch", { cwd: repoDir });
@@ -262,11 +332,103 @@ describe("WorktreeManager.create", () => {
     await run(remove(first.path));
   });
 
+  it("reuses preserved worktree when branch is mid-rebase (detached HEAD)", async () => {
+    const repoDir = await setupRepo();
+
+    // Create a branch with a commit that will conflict during rebase
+    await execAsync("git checkout -b feat/rebase-test", { cwd: repoDir });
+    await commitFile(
+      repoDir,
+      "conflict.txt",
+      "branch-content",
+      "branch commit",
+    );
+    await execAsync("git checkout main", { cwd: repoDir });
+
+    // Create a conflicting commit on main so rebase will pause
+    await commitFile(
+      repoDir,
+      "conflict.txt",
+      "main-content",
+      "main conflicting commit",
+    );
+
+    // Create the worktree for feat/rebase-test
+    const first = await run(create(repoDir, { branch: "feat/rebase-test" }));
+    expect(first.branch).toBe("feat/rebase-test");
+
+    // Start a rebase inside the worktree that will conflict (detaches HEAD)
+    await execAsync("git rebase main", { cwd: first.path }).catch(() => {
+      // Expected to fail due to conflict — HEAD is now detached mid-rebase
+    });
+
+    // Verify HEAD is detached (mid-rebase state)
+    const { stdout: headRef } = await execAsync(
+      "git rev-parse --abbrev-ref HEAD",
+      { cwd: first.path },
+    );
+    expect(headRef.trim()).toBe("HEAD"); // detached
+
+    // Now try to create the worktree again — should reuse the existing one
+    const second = await run(create(repoDir, { branch: "feat/rebase-test" }));
+
+    expect(second.path).toBe(first.path);
+    expect(second.branch).toBe("feat/rebase-test");
+
+    // Cleanup: abort the rebase so git worktree remove works
+    await execAsync("git rebase --abort", { cwd: first.path });
+    await run(remove(first.path));
+  });
+
   it("detects collision when branch is checked out in the main working tree", async () => {
     const repoDir = await setupRepo();
     // "main" is the currently checked-out branch in the main working tree
     const err = await runFail(create(repoDir, { branch: "main" }));
     expect(err.message).toMatch(/already checked out/i);
+  });
+
+  it("does not write upstream tracking config even when autoSetupMerge is enabled", async () => {
+    const repoDir = await setupRepo();
+
+    // Enable the config that triggers .git/config writes during branch creation
+    await execAsync("git config branch.autoSetupMerge always", {
+      cwd: repoDir,
+    });
+
+    const { path, branch } = await run(
+      create(repoDir, { branch: "sandcastle/no-tracking-test" }),
+    );
+
+    // If -c branch.autoSetupMerge=false is working, the new branch should
+    // have no upstream tracking config (no branch.<name>.remote or .merge)
+    const { stdout: trackingConfig } = await execAsync(
+      `git config --get-regexp "branch\\.sandcastle/no-tracking-test\\." || true`,
+      { cwd: repoDir },
+    );
+    expect(trackingConfig.trim()).toBe("");
+
+    await run(remove(path));
+  });
+
+  it("does not write upstream tracking config for temp branches when autoSetupMerge is enabled", async () => {
+    const repoDir = await setupRepo();
+
+    // Enable the config that triggers .git/config writes during branch creation
+    await execAsync("git config branch.autoSetupMerge always", {
+      cwd: repoDir,
+    });
+
+    const { path, branch } = await run(create(repoDir));
+
+    // The temp branch should also have no upstream tracking config
+    const escapedBranch = branch.replace(/\//g, "\\/").replace(/\./g, "\\.");
+    const { stdout: trackingConfig } = await execAsync(
+      `git config --get-regexp "branch\\.${escapedBranch}\\." || true`,
+      { cwd: repoDir },
+    );
+    expect(trackingConfig.trim()).toBe("");
+
+    await run(remove(path));
   });
 });
 
@@ -341,6 +503,25 @@ describe("WorktreeManager.pruneStale", () => {
     await run(remove(path));
     // suppress unused var warning
     void name;
+  });
+
+  it("does not remove active worktrees when .sandcastle is a symlink", async () => {
+    // Regression test for #470: git canonicalizes worktree paths, so when
+    // .sandcastle is a symlink the un-canonicalized entryPath never matched
+    // the active-set and active worktrees got wiped out from under their
+    // running sandboxes.
+    const repoDir = await setupRepo();
+    const externalDir = await mkdtemp(join(tmpdir(), "wt-external-"));
+    await symlink(externalDir, join(repoDir, ".sandcastle"));
+
+    const { path } = await run(create(repoDir));
+
+    await run(pruneStale(repoDir));
+
+    const s = await stat(path);
+    expect(s.isDirectory()).toBe(true);
+
+    await run(remove(path));
   });
 });
 

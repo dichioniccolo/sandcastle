@@ -62,15 +62,18 @@ export type SandboxHooks = {
   readonly host?: {
     readonly onWorktreeReady?: ReadonlyArray<{
       readonly command: string;
+      readonly timeoutMs?: number;
     }>;
     readonly onSandboxReady?: ReadonlyArray<{
       readonly command: string;
+      readonly timeoutMs?: number;
     }>;
   };
   readonly sandbox?: {
     readonly onSandboxReady?: ReadonlyArray<{
       readonly command: string;
       readonly sudo?: boolean;
+      readonly timeoutMs?: number;
     }>;
   };
 };
@@ -81,12 +84,16 @@ export type SandboxHooks = {
  * Fails fast on non-zero exit.
  */
 export const runHostHooks = (
-  hooks: ReadonlyArray<{ readonly command: string }>,
+  hooks: ReadonlyArray<{
+    readonly command: string;
+    readonly timeoutMs?: number;
+  }>,
   cwd: string,
   signal?: AbortSignal,
 ): Effect.Effect<void, ExecError | HookTimeoutError> =>
   Effect.gen(function* () {
     for (const hook of hooks) {
+      const timeout = hook.timeoutMs ?? HOOK_TIMEOUT_MS;
       yield* Effect.tryPromise({
         try: () => execAsync(hook.command, { cwd, signal }),
         catch: (err) =>
@@ -96,11 +103,11 @@ export const runHostHooks = (
           }),
       }).pipe(
         withTimeout(
-          HOOK_TIMEOUT_MS,
+          timeout,
           () =>
             new HookTimeoutError({
-              message: `Host hook '${hook.command}' timed out after ${HOOK_TIMEOUT_MS}ms`,
-              timeoutMs: HOOK_TIMEOUT_MS,
+              message: `Host hook '${hook.command}' timed out after ${timeout}ms`,
+              timeoutMs: timeout,
               command: hook.command,
             }),
         ),
@@ -258,18 +265,19 @@ export const withSandboxLifecycle = <A>(
           abortCleanup = () => signal.removeEventListener("abort", onAbort);
         }
 
-        const sandboxHookEffects = (sandboxHooks ?? []).map((hook) =>
-          Effect.raceFirst(
+        const sandboxHookEffects = (sandboxHooks ?? []).map((hook) => {
+          const timeout = hook.timeoutMs ?? HOOK_TIMEOUT_MS;
+          return Effect.raceFirst(
             execOk(sandbox, hook.command, {
               cwd: sandboxRepoDir,
               sudo: hook.sudo,
             }).pipe(
               withTimeout(
-                HOOK_TIMEOUT_MS,
+                timeout,
                 () =>
                   new HookTimeoutError({
-                    message: `Hook '${hook.command}' timed out after ${HOOK_TIMEOUT_MS}ms`,
-                    timeoutMs: HOOK_TIMEOUT_MS,
+                    message: `Hook '${hook.command}' timed out after ${timeout}ms`,
+                    timeoutMs: timeout,
                     command: hook.command,
                   }),
               ),
@@ -279,11 +287,12 @@ export const withSandboxLifecycle = <A>(
               ExecError,
               never
             >,
-          ),
-        );
+          );
+        });
 
-        const hostHookEffects = (hostOnSandboxReady ?? []).map((hook) =>
-          Effect.tryPromise({
+        const hostHookEffects = (hostOnSandboxReady ?? []).map((hook) => {
+          const timeout = hook.timeoutMs ?? HOOK_TIMEOUT_MS;
+          return Effect.tryPromise({
             try: () =>
               execAsync(hook.command, {
                 cwd: hostSideWorktreePath,
@@ -296,16 +305,16 @@ export const withSandboxLifecycle = <A>(
               }),
           }).pipe(
             withTimeout(
-              HOOK_TIMEOUT_MS,
+              timeout,
               () =>
                 new HookTimeoutError({
-                  message: `Host hook '${hook.command}' timed out after ${HOOK_TIMEOUT_MS}ms`,
-                  timeoutMs: HOOK_TIMEOUT_MS,
+                  message: `Host hook '${hook.command}' timed out after ${timeout}ms`,
+                  timeoutMs: timeout,
                   command: hook.command,
                 }),
             ),
-          ),
-        );
+          );
+        });
 
         const allOnSandboxReady = [...sandboxHookEffects, ...hostHookEffects];
         yield* (

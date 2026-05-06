@@ -21,7 +21,7 @@ const TEMPLATES: TemplateMetadata[] = [
   },
   {
     name: "simple-loop",
-    description: "Picks GitHub issues one by one and closes them",
+    description: "Picks issues one by one and closes them",
   },
   {
     name: "sequential-reviewer",
@@ -67,11 +67,15 @@ RUN apt-get update && apt-get install -y \\
 
 {{BACKLOG_MANAGER_TOOLS}}
 
-# Rename the base image's "node" user (UID 1000) to "agent".
-# This keeps UID 1000 so that --userns=keep-id (Podman) and
-# --user 1000:1000 (Docker) map to the correct home directory owner.
-RUN usermod -d /home/agent -m -l agent node
-USER agent
+# Build-args for UID/GID alignment: sandcastle docker build-image
+# defaults these to the host user's UID/GID so image-built files
+# and bind-mounted files share an owner without runtime chown.
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+
+# Rename the base image's "node" user to "agent" and align UID/GID.
+RUN groupmod -g $AGENT_GID node && usermod -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
+USER \${AGENT_UID}:\${AGENT_GID}
 
 # Install Claude Code CLI
 RUN curl -fsSL https://claude.ai/install.sh | bash
@@ -98,15 +102,19 @@ RUN apt-get update && apt-get install -y \\
 
 {{BACKLOG_MANAGER_TOOLS}}
 
-# Rename the base image's "node" user (UID 1000) to "agent".
-# This keeps UID 1000 so that --userns=keep-id (Podman) and
-# --user 1000:1000 (Docker) map to the correct home directory owner.
-RUN usermod -d /home/agent -m -l agent node
+# Build-args for UID/GID alignment: sandcastle docker build-image
+# defaults these to the host user's UID/GID so image-built files
+# and bind-mounted files share an owner without runtime chown.
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+
+# Rename the base image's "node" user to "agent" and align UID/GID.
+RUN groupmod -g $AGENT_GID node && usermod -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
 
 # Install pi coding agent (run as root before USER agent)
 RUN npm install -g @mariozechner/pi-coding-agent
 
-USER agent
+USER \${AGENT_UID}:\${AGENT_GID}
 
 WORKDIR /home/agent
 
@@ -127,15 +135,19 @@ RUN apt-get update && apt-get install -y \\
 
 {{BACKLOG_MANAGER_TOOLS}}
 
-# Rename the base image's "node" user (UID 1000) to "agent".
-# This keeps UID 1000 so that --userns=keep-id (Podman) and
-# --user 1000:1000 (Docker) map to the correct home directory owner.
-RUN usermod -d /home/agent -m -l agent node
+# Build-args for UID/GID alignment: sandcastle docker build-image
+# defaults these to the host user's UID/GID so image-built files
+# and bind-mounted files share an owner without runtime chown.
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+
+# Rename the base image's "node" user to "agent" and align UID/GID.
+RUN groupmod -g $AGENT_GID node && usermod -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
 
 # Install Codex CLI (run as root before USER agent)
 RUN npm install -g @openai/codex
 
-USER agent
+USER \${AGENT_UID}:\${AGENT_GID}
 
 WORKDIR /home/agent
 
@@ -188,15 +200,19 @@ RUN apt-get update && apt-get install -y \\
 
 {{BACKLOG_MANAGER_TOOLS}}
 
-# Rename the base image's "node" user (UID 1000) to "agent".
-# This keeps UID 1000 so that --userns=keep-id (Podman) and
-# --user 1000:1000 (Docker) map to the correct home directory owner.
-RUN usermod -d /home/agent -m -l agent node
+# Build-args for UID/GID alignment: sandcastle docker build-image
+# defaults these to the host user's UID/GID so image-built files
+# and bind-mounted files share an owner without runtime chown.
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
+
+# Rename the base image's "node" user to "agent" and align UID/GID.
+RUN groupmod -g $AGENT_GID node && usermod -u $AGENT_UID -g $AGENT_GID -d /home/agent -m -l agent node
 
 # Install OpenCode CLI (run as root before USER agent)
 RUN npm install -g opencode-ai@latest
 
-USER agent
+USER \${AGENT_UID}:\${AGENT_GID}
 
 WORKDIR /home/agent
 
@@ -285,9 +301,11 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \\
 
 const BEADS_TOOLS = `# Install system dependencies for Beads
 RUN apt-get update && apt-get install -y \\
+  dpkg-dev \\
   libicu72 \\
   && rm -rf /var/lib/apt/lists/* \\
-  && for lib in /usr/lib/x86_64-linux-gnu/libicu*.so.72; do \\
+  && ARCH_DIR=$(dpkg-architecture -qDEB_HOST_MULTIARCH) \\
+  && for lib in /usr/lib/$ARCH_DIR/libicu*.so.72; do \\
        ln -s "$lib" "\${lib%.72}.74"; \\
      done
 
@@ -301,8 +319,8 @@ const BACKLOG_MANAGER_REGISTRY: BacklogManagerEntry[] = [
     label: "GitHub Issues",
     templateArgs: {
       LIST_TASKS_COMMAND: `gh issue list --state open --label Sandcastle --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'`,
-      VIEW_TASK_COMMAND: "gh issue view {{TASK_ID}}",
-      CLOSE_TASK_COMMAND: `gh issue close {{TASK_ID}} --comment "Completed by Sandcastle"`,
+      VIEW_TASK_COMMAND: "gh issue view <ID>",
+      CLOSE_TASK_COMMAND: `gh issue close <ID> --comment "Completed by Sandcastle"`,
       BACKLOG_MANAGER_TOOLS: GITHUB_CLI_TOOLS,
     },
     envExample: `# GitHub personal access token
@@ -313,8 +331,8 @@ GH_TOKEN=`,
     label: "Beads",
     templateArgs: {
       LIST_TASKS_COMMAND: "bd ready --json",
-      VIEW_TASK_COMMAND: "bd show {{TASK_ID}}",
-      CLOSE_TASK_COMMAND: `bd close {{TASK_ID}} "Completed by Sandcastle"`,
+      VIEW_TASK_COMMAND: "bd show <ID>",
+      CLOSE_TASK_COMMAND: `bd close <ID> "Completed by Sandcastle"`,
       BACKLOG_MANAGER_TOOLS: BEADS_TOOLS,
     },
     envExample: "",

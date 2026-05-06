@@ -33,6 +33,7 @@ import { generateTempBranchName, getCurrentBranch } from "./WorktreeManager.js";
 import {
   type PromptArgs,
   substitutePromptArgs,
+  validateNoArgsWithInlinePrompt,
   validateNoBuiltInArgOverride,
   findMissingPromptArgKeys,
   BUILT_IN_PROMPT_ARG_KEYS,
@@ -40,6 +41,7 @@ import {
 import { noSandbox } from "./sandboxes/no-sandbox.js";
 import { raceAbortSignal } from "./raceAbortSignal.js";
 import { resolveCwd } from "./resolveCwd.js";
+import type { Timeouts } from "./run.js";
 
 export interface InteractiveOptions {
   /** Agent provider to use (e.g. claudeCode("claude-opus-4-6")) */
@@ -82,6 +84,8 @@ export interface InteractiveOptions {
    * - The worktree is preserved on disk after abort (error-path behavior).
    */
   readonly signal?: AbortSignal;
+  /** Override default timeouts for built-in lifecycle steps. Unset keys keep their defaults. */
+  readonly timeouts?: Timeouts;
 }
 
 export interface InteractiveResult {
@@ -161,9 +165,11 @@ export const interactive = async (
 
     // 1. Resolve prompt (from string or file), or skip if neither provided
     const hasPromptSource = prompt !== undefined || promptFile !== undefined;
-    const rawPrompt = hasPromptSource
+    const resolved = hasPromptSource
       ? yield* resolvePrompt({ prompt, promptFile })
-      : "";
+      : undefined;
+    const rawPrompt = resolved?.text ?? "";
+    const isInlinePrompt = resolved?.source === "inline";
 
     // 2. Resolve env vars
     const resolvedEnv = yield* resolveEnv(hostRepoDir);
@@ -182,9 +188,10 @@ export const interactive = async (
         ? currentHostBranch
         : (branch ?? generateTempBranchName(options.name));
 
-    // 4. Validate prompt args and collect missing ones interactively (skip when no prompt)
+    // 4. Validate prompt args and collect missing ones interactively (skip when no prompt).
+    // Inline prompts pass through literally — skip scanning, substitution, and built-in args.
     let substitutedPrompt = rawPrompt;
-    if (hasPromptSource) {
+    if (hasPromptSource && !isInlinePrompt) {
       const userArgs = options.promptArgs ?? {};
       yield* validateNoBuiltInArgOverride(userArgs);
 
@@ -221,6 +228,9 @@ export const interactive = async (
         effectiveArgs,
         builtInArgKeysSet,
       );
+    } else if (isInlinePrompt) {
+      const userArgs = options.promptArgs ?? {};
+      yield* validateNoArgsWithInlinePrompt(userArgs);
     }
 
     // In head mode, pass the host branch so SandboxLifecycle skips the merge step.
@@ -261,6 +271,7 @@ export const interactive = async (
             options.copyToWorktree!,
             hostRepoDir,
             worktreeInfo!.path,
+            options.timeouts?.copyToWorktreeMs,
           ),
         );
       }
@@ -346,15 +357,16 @@ export const interactive = async (
         },
         (ctx) =>
           Effect.gen(function* () {
-            // Preprocess prompt (expand !`command` shell expressions inside sandbox)
-            // Skip when no prompt source was provided
-            const fullPrompt = hasPromptSource
-              ? yield* preprocessPrompt(
-                  substitutedPrompt,
-                  ctx.sandbox,
-                  ctx.sandboxRepoDir,
-                )
-              : "";
+            // Preprocess prompt (expand !`command` shell expressions inside sandbox).
+            // Skip when no prompt source was provided, or when inline (literal passthrough).
+            const fullPrompt =
+              !hasPromptSource || isInlinePrompt
+                ? substitutedPrompt
+                : yield* preprocessPrompt(
+                    substitutedPrompt,
+                    ctx.sandbox,
+                    ctx.sandboxRepoDir,
+                  );
 
             // Build interactive args and run the session
             const interactiveArgs = provider.buildInteractiveArgs!({

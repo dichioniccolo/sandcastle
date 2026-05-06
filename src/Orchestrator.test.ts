@@ -17,27 +17,35 @@ import { describe, expect, it } from "vitest";
 import { Display, type DisplayEntry, SilentDisplay } from "./Display.js";
 import { makeLocalSandboxLayer } from "./testSandbox.js";
 import { orchestrate } from "./Orchestrator.js";
+import { substitutePromptArgs } from "./PromptArgumentSubstitution.js";
 import {
   claudeCode,
   codex as codexFactory,
+  opencode as opencodeFactory,
   pi as piFactory,
   DEFAULT_MODEL,
 } from "./AgentProvider.js";
 import { Sandbox } from "./SandboxFactory.js";
 import type { DockerError, SandboxError } from "./errors.js";
-import { AgentIdleTimeoutError } from "./errors.js";
+import { AgentError, AgentIdleTimeoutError } from "./errors.js";
 import { SandboxFactory } from "./SandboxFactory.js";
 import { encodeProjectPath } from "./SessionStore.js";
 import { defaultSessionPathsLayer, sessionPathsLayer } from "./SessionPaths.js";
+import {
+  callbackAgentStreamEmitterLayer,
+  noopAgentStreamEmitterLayer,
+  type AgentStreamEvent,
+} from "./AgentStreamEmitter.js";
 import type { BindMountSandboxHandle } from "./SandboxProvider.js";
 
 const execAsync = promisify(exec);
 
 const testProvider = claudeCode("test-model");
 
-const testDisplayLayer = Layer.merge(
+const testDisplayLayer = Layer.mergeAll(
   SilentDisplay.layer(Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([])),
   defaultSessionPathsLayer,
+  noopAgentStreamEmitterLayer,
 );
 
 const initRepo = async (dir: string) => {
@@ -1042,7 +1050,10 @@ describe("Orchestrator tool call display integration", () => {
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
     const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = SilentDisplay.layer(ref);
+    const displayLayer = Layer.merge(
+      SilentDisplay.layer(ref),
+      noopAgentStreamEmitterLayer,
+    );
 
     const mockLayer = makeTestSandboxFactory(hostDir, (dir) => {
       const fsLayer = makeLocalSandboxLayer(dir);
@@ -1114,6 +1125,7 @@ describe("Orchestrator tool call display integration", () => {
             mockLayer.factoryLayer,
             displayLayer,
             defaultSessionPathsLayer,
+            noopAgentStreamEmitterLayer,
           ),
         ),
       ),
@@ -1137,6 +1149,177 @@ describe("Orchestrator tool call display integration", () => {
       name: "WebSearch",
       formattedArgs: "effect-ts docs",
     });
+  });
+});
+
+describe("Orchestrator agent stream emitter", () => {
+  it("emits text and toolCall events with iteration index and timestamps", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-stream-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
+    const displayLayer = SilentDisplay.layer(ref);
+
+    const events: AgentStreamEvent[] = [];
+    const emitterLayer = callbackAgentStreamEmitterLayer((e) => {
+      events.push(e);
+    });
+
+    const mockLayer = makeTestSandboxFactory(hostDir, (dir) => {
+      const fsLayer = makeLocalSandboxLayer(dir);
+      return Layer.succeed(Sandbox, {
+        exec: (command, options) => {
+          if (command.startsWith("claude ") && options?.onLine) {
+            const onLine = options.onLine;
+            const lines = [
+              JSON.stringify({
+                type: "assistant",
+                message: {
+                  content: [
+                    { type: "text", text: "Working now" },
+                    {
+                      type: "tool_use",
+                      name: "Bash",
+                      input: { command: "ls" },
+                    },
+                  ],
+                },
+              }),
+              JSON.stringify({
+                type: "result",
+                result: "<promise>COMPLETE</promise>",
+              }),
+            ];
+            for (const line of lines) onLine(line);
+            return Effect.succeed({
+              stdout: lines.join("\n"),
+              stderr: "",
+              exitCode: 0,
+            });
+          }
+          return Effect.flatMap(Sandbox, (real) =>
+            real.exec(command, options),
+          ).pipe(Effect.provide(fsLayer));
+        },
+        copyIn: (hostPath, sandboxPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyIn(hostPath, sandboxPath),
+          ).pipe(Effect.provide(fsLayer)),
+        copyFileOut: (sandboxPath, hostPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyFileOut(sandboxPath, hostPath),
+          ).pipe(Effect.provide(fsLayer)),
+      });
+    });
+
+    await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do work",
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            mockLayer.factoryLayer,
+            displayLayer,
+            defaultSessionPathsLayer,
+            emitterLayer,
+          ),
+        ),
+      ),
+    );
+
+    const textEvents = events.filter((e) => e.type === "text");
+    const toolCallEvents = events.filter((e) => e.type === "toolCall");
+
+    expect(textEvents.length).toBeGreaterThan(0);
+    expect(textEvents[0]!.message).toContain("Working now");
+    expect(textEvents[0]!.iteration).toBe(1);
+    expect(textEvents[0]!.timestamp).toBeInstanceOf(Date);
+
+    expect(toolCallEvents).toHaveLength(1);
+    expect(toolCallEvents[0]).toMatchObject({
+      type: "toolCall",
+      name: "Bash",
+      formattedArgs: "ls",
+      iteration: 1,
+    });
+    expect(toolCallEvents[0]!.timestamp).toBeInstanceOf(Date);
+  });
+
+  it("swallows errors thrown by the callback", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-stream-err-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
+    const displayLayer = SilentDisplay.layer(ref);
+
+    const emitterLayer = callbackAgentStreamEmitterLayer(() => {
+      throw new Error("callback intentionally broken");
+    });
+
+    const mockLayer = makeTestSandboxFactory(hostDir, (dir) => {
+      const fsLayer = makeLocalSandboxLayer(dir);
+      return Layer.succeed(Sandbox, {
+        exec: (command, options) => {
+          if (command.startsWith("claude ") && options?.onLine) {
+            const onLine = options.onLine;
+            const lines = [
+              JSON.stringify({
+                type: "assistant",
+                message: {
+                  content: [{ type: "text", text: "Hello there" }],
+                },
+              }),
+              JSON.stringify({
+                type: "result",
+                result: "<promise>COMPLETE</promise>",
+              }),
+            ];
+            for (const line of lines) onLine(line);
+            return Effect.succeed({
+              stdout: lines.join("\n"),
+              stderr: "",
+              exitCode: 0,
+            });
+          }
+          return Effect.flatMap(Sandbox, (real) =>
+            real.exec(command, options),
+          ).pipe(Effect.provide(fsLayer));
+        },
+        copyIn: (hostPath, sandboxPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyIn(hostPath, sandboxPath),
+          ).pipe(Effect.provide(fsLayer)),
+        copyFileOut: (sandboxPath, hostPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyFileOut(sandboxPath, hostPath),
+          ).pipe(Effect.provide(fsLayer)),
+      });
+    });
+
+    const result = await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do work",
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            mockLayer.factoryLayer,
+            displayLayer,
+            defaultSessionPathsLayer,
+            emitterLayer,
+          ),
+        ),
+      ),
+    );
+
+    expect(result.completionSignal).toBe("<promise>COMPLETE</promise>");
   });
 });
 
@@ -1403,6 +1586,184 @@ describe("Orchestrator error handling", () => {
 
     expect(exit._tag).toBe("Failure");
   });
+
+  it("falls back to tail of stdout when stderr is empty on non-zero exit (no-op parser)", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-stderr-fallback-"));
+
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const opencodeProvider = opencodeFactory("test-model");
+    const stdoutContent = "Setting up environment...\nLoading model...\nError: API key is invalid\nPlease check your credentials";
+
+    const { factoryLayer } = makeTestSandboxFactory(
+      hostDir,
+      (dir) => {
+        const fsLayer = makeLocalSandboxLayer(dir);
+        return Layer.succeed(Sandbox, {
+          exec: (command, options) => {
+            if (command.startsWith("opencode ")) {
+              return Effect.succeed({
+                stdout: stdoutContent,
+                stderr: "",
+                exitCode: 1,
+              });
+            }
+            return Effect.flatMap(Sandbox, (real) =>
+              real.exec(command, options),
+            ).pipe(Effect.provide(fsLayer));
+          },
+          copyIn: (hostPath, sandboxPath) =>
+            Effect.flatMap(Sandbox, (real) =>
+              real.copyIn(hostPath, sandboxPath),
+            ).pipe(Effect.provide(fsLayer)),
+          copyFileOut: (sandboxPath, hostPath) =>
+            Effect.flatMap(Sandbox, (real) =>
+              real.copyFileOut(sandboxPath, hostPath),
+            ).pipe(Effect.provide(fsLayer)),
+        });
+      },
+    );
+
+    const exit = await Effect.runPromiseExit(
+      orchestrate({
+        provider: opencodeProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do some work",
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+    );
+
+    expect(exit._tag).toBe("Failure");
+    if (exit._tag === "Failure") {
+      const err = Cause.squash(exit.cause);
+      expect(err).toBeInstanceOf(AgentError);
+      if (err instanceof AgentError) {
+        expect(err.message).toContain("opencode exited with code 1:");
+        expect(err.message).toContain("API key is invalid");
+      }
+    }
+  });
+
+  it("falls back to resultText when stderr is empty on non-zero exit (structured parser)", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-resulttext-fallback-"));
+
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    // Use Claude Code provider which has a structured parser that populates resultText
+    const errorLine = JSON.stringify({
+      type: "result",
+      result: "Rate limit exceeded, please retry later",
+    });
+
+    const { factoryLayer } = makeTestSandboxFactory(
+      hostDir,
+      (dir) => {
+        const fsLayer = makeLocalSandboxLayer(dir);
+        return Layer.succeed(Sandbox, {
+          exec: (command, options) => {
+            if (command.startsWith("claude ") && options?.onLine) {
+              options.onLine(errorLine);
+              return Effect.succeed({
+                stdout: errorLine,
+                stderr: "",
+                exitCode: 1,
+              });
+            }
+            return Effect.flatMap(Sandbox, (real) =>
+              real.exec(command, options),
+            ).pipe(Effect.provide(fsLayer));
+          },
+          copyIn: (hostPath, sandboxPath) =>
+            Effect.flatMap(Sandbox, (real) =>
+              real.copyIn(hostPath, sandboxPath),
+            ).pipe(Effect.provide(fsLayer)),
+          copyFileOut: (sandboxPath, hostPath) =>
+            Effect.flatMap(Sandbox, (real) =>
+              real.copyFileOut(sandboxPath, hostPath),
+            ).pipe(Effect.provide(fsLayer)),
+        });
+      },
+    );
+
+    const exit = await Effect.runPromiseExit(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do some work",
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+    );
+
+    expect(exit._tag).toBe("Failure");
+    if (exit._tag === "Failure") {
+      const err = Cause.squash(exit.cause);
+      expect(err).toBeInstanceOf(AgentError);
+      if (err instanceof AgentError) {
+        expect(err.message).toContain("claude-code exited with code 1:");
+        expect(err.message).toContain("Rate limit exceeded, please retry later");
+      }
+    }
+  });
+
+  it("preserves stderr in error when stderr is non-empty", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-stderr-present-"));
+
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    const opencodeProvider = opencodeFactory("test-model");
+
+    const { factoryLayer } = makeTestSandboxFactory(
+      hostDir,
+      (dir) => {
+        const fsLayer = makeLocalSandboxLayer(dir);
+        return Layer.succeed(Sandbox, {
+          exec: (command, options) => {
+            if (command.startsWith("opencode ")) {
+              return Effect.succeed({
+                stdout: "some stdout output",
+                stderr: "fatal error from stderr",
+                exitCode: 1,
+              });
+            }
+            return Effect.flatMap(Sandbox, (real) =>
+              real.exec(command, options),
+            ).pipe(Effect.provide(fsLayer));
+          },
+          copyIn: (hostPath, sandboxPath) =>
+            Effect.flatMap(Sandbox, (real) =>
+              real.copyIn(hostPath, sandboxPath),
+            ).pipe(Effect.provide(fsLayer)),
+          copyFileOut: (sandboxPath, hostPath) =>
+            Effect.flatMap(Sandbox, (real) =>
+              real.copyFileOut(sandboxPath, hostPath),
+            ).pipe(Effect.provide(fsLayer)),
+        });
+      },
+    );
+
+    const exit = await Effect.runPromiseExit(
+      orchestrate({
+        provider: opencodeProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: "do some work",
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+    );
+
+    expect(exit._tag).toBe("Failure");
+    if (exit._tag === "Failure") {
+      const err = Cause.squash(exit.cause);
+      expect(err).toBeInstanceOf(AgentError);
+      if (err instanceof AgentError) {
+        expect(err.message).toContain("fatal error from stderr");
+        // Should NOT fall back to stdout when stderr is present
+        expect(err.message).not.toContain("some stdout output");
+      }
+    }
+  });
 });
 
 describe("Orchestrator streaming", () => {
@@ -1658,13 +2019,21 @@ describe("Orchestrator prompt preprocessing", () => {
       },
     );
 
+    // In production the prompt is always run through substitutePromptArgs
+    // before reaching orchestrate (which marks template shell blocks).
+    const marked = await Effect.runPromise(
+      substitutePromptArgs(
+        "Context: !`echo hello-from-sandbox`\n\nDo the work.",
+        {},
+      ).pipe(Effect.provide(testDisplayLayer)),
+    );
     await Effect.runPromise(
       orchestrate({
         provider: testProvider,
         hostRepoDir: hostDir,
 
         iterations: 1,
-        prompt: "Context: !`echo hello-from-sandbox`\n\nDo the work.",
+        prompt: marked,
       }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
     );
 
@@ -1729,6 +2098,66 @@ describe("Orchestrator prompt preprocessing", () => {
 
     expect(capturedStdin).toContain("Just a plain prompt with no commands.");
   });
+
+  it("passes prompt through literally when skipPromptExpansion is true", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "orch-skipexp-host-"));
+
+    await initRepo(hostDir);
+    await commitFile(hostDir, "hello.txt", "hello", "initial commit");
+
+    let capturedStdin = "";
+
+    const { factoryLayer } = makeTestSandboxFactory(hostDir, (dir) => {
+      const fsLayer = makeLocalSandboxLayer(dir);
+      return Layer.succeed(Sandbox, {
+        exec: (command, options) => {
+          if (command.startsWith("claude ") && options?.onLine) {
+            const onLine = options.onLine;
+            capturedStdin = options?.stdin ?? "";
+            const output = "Done.";
+            const streamOutput = toStreamJson(output);
+            for (const line of streamOutput.split("\n")) {
+              onLine(line);
+            }
+            return Effect.succeed({
+              stdout: streamOutput,
+              stderr: "",
+              exitCode: 0,
+            });
+          }
+          return Effect.flatMap(Sandbox, (real) =>
+            real.exec(command, options),
+          ).pipe(Effect.provide(fsLayer));
+        },
+        copyIn: (hostPath, sandboxPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyIn(hostPath, sandboxPath),
+          ).pipe(Effect.provide(fsLayer)),
+        copyFileOut: (sandboxPath, hostPath) =>
+          Effect.flatMap(Sandbox, (real) =>
+            real.copyFileOut(sandboxPath, hostPath),
+          ).pipe(Effect.provide(fsLayer)),
+      });
+    });
+
+    const literalPrompt =
+      "Context: !`echo hello-from-sandbox`\n\n{{ISSUE_NUMBER}} should pass through.";
+
+    await Effect.runPromise(
+      orchestrate({
+        provider: testProvider,
+        hostRepoDir: hostDir,
+        iterations: 1,
+        prompt: literalPrompt,
+        skipPromptExpansion: true,
+      }).pipe(Effect.provide(Layer.merge(factoryLayer, testDisplayLayer))),
+    );
+
+    // Both the shell expression and the {{KEY}} placeholder are delivered verbatim.
+    expect(capturedStdin).toContain("!`echo hello-from-sandbox`");
+    expect(capturedStdin).toContain("{{ISSUE_NUMBER}}");
+    expect(capturedStdin).not.toContain("hello-from-sandbox\n");
+  });
 });
 
 describe("Orchestrator Display integration", () => {
@@ -1739,7 +2168,10 @@ describe("Orchestrator Display integration", () => {
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
     const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = SilentDisplay.layer(ref);
+    const displayLayer = Layer.merge(
+      SilentDisplay.layer(ref),
+      noopAgentStreamEmitterLayer,
+    );
 
     const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
       hostDir,
@@ -1805,7 +2237,10 @@ describe("Orchestrator Display integration", () => {
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
     const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = SilentDisplay.layer(ref);
+    const displayLayer = Layer.merge(
+      SilentDisplay.layer(ref),
+      noopAgentStreamEmitterLayer,
+    );
 
     const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
       hostDir,
@@ -1883,7 +2318,10 @@ describe("Orchestrator Display integration", () => {
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
     const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = SilentDisplay.layer(ref);
+    const displayLayer = Layer.merge(
+      SilentDisplay.layer(ref),
+      noopAgentStreamEmitterLayer,
+    );
 
     const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
       hostDir,
@@ -1928,7 +2366,10 @@ describe("Orchestrator Display integration", () => {
     await commitFile(hostDir, "hello.txt", "hello", "initial commit");
 
     const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = SilentDisplay.layer(ref);
+    const displayLayer = Layer.merge(
+      SilentDisplay.layer(ref),
+      noopAgentStreamEmitterLayer,
+    );
 
     const { factoryLayer, sandboxRepoDir } = makeTestSandboxFactory(
       hostDir,
@@ -2183,7 +2624,10 @@ describe("Orchestrator Display integration", () => {
     );
 
     const displayEntries = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = SilentDisplay.layer(displayEntries);
+    const displayLayer = Layer.merge(
+      SilentDisplay.layer(displayEntries),
+      noopAgentStreamEmitterLayer,
+    );
 
     const exitResult = await Effect.runPromise(
       orchestrate({
@@ -2276,7 +2720,10 @@ describe("Orchestrator Display integration", () => {
     );
 
     const displayEntries = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = SilentDisplay.layer(displayEntries);
+    const displayLayer = Layer.merge(
+      SilentDisplay.layer(displayEntries),
+      noopAgentStreamEmitterLayer,
+    );
 
     const exitResult = await Effect.runPromise(
       orchestrate({
@@ -2496,7 +2943,10 @@ describe("Orchestrator with pi provider", () => {
     );
 
     const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = SilentDisplay.layer(ref);
+    const displayLayer = Layer.merge(
+      SilentDisplay.layer(ref),
+      noopAgentStreamEmitterLayer,
+    );
 
     const fsLayer = makeLocalSandboxLayer(hostDir);
     const mockLayer = Layer.succeed(Sandbox, {
@@ -2584,7 +3034,10 @@ describe("Orchestrator with pi provider", () => {
     ];
 
     const ref = Ref.unsafeMake<ReadonlyArray<DisplayEntry>>([]);
-    const displayLayer = SilentDisplay.layer(ref);
+    const displayLayer = Layer.merge(
+      SilentDisplay.layer(ref),
+      noopAgentStreamEmitterLayer,
+    );
 
     const fsLayer = makeLocalSandboxLayer(hostDir);
     const mockLayer = Layer.succeed(Sandbox, {

@@ -10,7 +10,7 @@
 
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import type { BindMountSandboxHandle } from "./SandboxProvider.js";
 
 // ---------------------------------------------------------------------------
@@ -38,9 +38,9 @@ export interface SessionStore {
  * Replaces path separators with hyphens, matching Claude Code's convention.
  */
 export const encodeProjectPath = (cwd: string): string => {
-  // Strip trailing slash (but preserve root "/")
-  const normalized = cwd.length > 1 ? cwd.replace(/\/+$/, "") : cwd;
-  return normalized.replaceAll("/", "-");
+  const isRoot = cwd === "/" || /^[A-Za-z]:[\\/]?$/.test(cwd);
+  const normalized = isRoot ? cwd : cwd.replace(/[\\/]+$/, "");
+  return normalized.replace(/^([A-Za-z]):/, "$1").replace(/[\\/]/g, "-");
 };
 
 // ---------------------------------------------------------------------------
@@ -94,13 +94,17 @@ export const sandboxSessionStore = (
   projectsDir: string,
 ): SessionStore => {
   const encoded = encodeProjectPath(cwd);
-  const projectDir = join(projectsDir, encoded);
+  // Sandbox-side paths target a Linux container, so they must use POSIX
+  // separators regardless of host platform — platform-aware `join` produces
+  // backslashes on Windows hosts, which the container daemon rejects.
+  const projectDir = posix.join(projectsDir, encoded);
 
   return {
     cwd,
-    sessionFilePath: (id: string): string => join(projectDir, `${id}.jsonl`),
+    sessionFilePath: (id: string): string =>
+      posix.join(projectDir, `${id}.jsonl`),
     readSession: async (id: string): Promise<string> => {
-      const sandboxPath = join(projectDir, `${id}.jsonl`);
+      const sandboxPath = posix.join(projectDir, `${id}.jsonl`);
       const tmpPath = join(
         tmpdir(),
         `sandcastle-session-${id}-${Date.now()}.jsonl`,
@@ -113,7 +117,7 @@ export const sandboxSessionStore = (
       }
     },
     writeSession: async (id: string, content: string): Promise<void> => {
-      const sandboxPath = join(projectDir, `${id}.jsonl`);
+      const sandboxPath = posix.join(projectDir, `${id}.jsonl`);
       const tmpPath = join(
         tmpdir(),
         `sandcastle-session-${id}-${Date.now()}.jsonl`,

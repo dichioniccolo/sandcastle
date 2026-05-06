@@ -85,6 +85,12 @@ export interface BindMountSandboxProviderConfig {
   readonly name: string;
   /** Environment variables injected by this provider. Merged at launch time. */
   readonly env?: Record<string, string>;
+  /**
+   * Absolute path to the home directory inside the sandbox (e.g. `"/home/agent"`).
+   * Used to expand `~` in user-provided `sandboxPath` mount configs.
+   * Set to `undefined` for providers that do not have a fixed home directory.
+   */
+  readonly sandboxHomedir?: string;
   /** Create a sandbox handle from the given options. */
   readonly create: (
     options: BindMountCreateOptions,
@@ -160,6 +166,11 @@ export interface BindMountSandboxProvider {
   readonly name: string;
   /** Environment variables injected by this provider. */
   readonly env: Record<string, string>;
+  /**
+   * Absolute path to the home directory inside the sandbox (e.g. `"/home/agent"`).
+   * `undefined` when the provider does not declare a sandbox home directory.
+   */
+  readonly sandboxHomedir: string | undefined;
   /** @internal Create a sandbox handle. */
   readonly create: (
     options: BindMountCreateOptions,
@@ -245,6 +256,13 @@ export interface MergeToHeadBranchStrategy {
 export interface NamedBranchStrategy {
   readonly type: "branch";
   readonly branch: string;
+  /**
+   * Git ref to use as the starting point when creating a new branch.
+   * Only used when the branch doesn't already exist — ignored otherwise.
+   * Callers are responsible for ensuring the ref is current (e.g. `git fetch`).
+   * Defaults to `HEAD` when omitted.
+   */
+  readonly baseBranch?: string;
 }
 
 /** Branch strategy for bind-mount providers (all three variants). */
@@ -298,6 +316,7 @@ export const createBindMountSandboxProvider = (
   tag: "bind-mount",
   name: config.name,
   env: config.env ?? {},
+  sandboxHomedir: config.sandboxHomedir,
   create: config.create,
 });
 

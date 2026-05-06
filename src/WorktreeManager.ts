@@ -6,6 +6,19 @@ import { WorktreeError, WorktreeTimeoutError, withTimeout } from "./errors.js";
 
 const WORKTREE_TIMEOUT_MS = 30_000;
 
+/**
+ * Git global flags that prevent `git worktree add -b` from writing upstream
+ * tracking config to `.git/config`. Without these, a user's global
+ * `branch.autoSetupMerge` or `push.autoSetupRemote` can cause a config write
+ * that races with other processes holding `.git/config.lock`.
+ */
+const NO_CONFIG_LOCK_FLAGS = [
+  "-c",
+  "branch.autoSetupMerge=false",
+  "-c",
+  "push.autoSetupRemote=false",
+];
+
 /** Format a timestamp as YYYYMMDD-HHMMSS */
 const formatTimestamp = (date: Date): string => {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -117,6 +130,7 @@ export const create = (
   repoDir: string,
   opts?: {
     branch?: string;
+    baseBranch?: string;
     name?: string;
   },
 ): Effect.Effect<
@@ -152,9 +166,13 @@ export const create = (
     const worktreePath = join(worktreesDir, worktreeName);
 
     if (opts?.branch) {
-      // Proactively detect collision before git produces a confusing error
+      // Proactively detect collision before git produces a confusing error.
+      // Match by branch first; fall back to target path (covers mid-rebase
+      // detached-HEAD state where the branch field is null).
       const existing = yield* listWorktrees(repoDir);
-      const collision = existing.find((wt) => wt.branch === branch);
+      const collision =
+        existing.find((wt) => wt.branch === branch) ??
+        existing.find((wt) => wt.path === worktreePath);
       if (collision) {
         // Only reuse worktrees managed by sandcastle (under .sandcastle/worktrees/)
         const isManagedWorktree = collision.path.startsWith(worktreesDir);
@@ -180,11 +198,22 @@ export const create = (
           }),
         );
       }
-      yield* execGit(["worktree", "add", worktreePath, branch], repoDir).pipe(
+      yield* execGit(
+        [...NO_CONFIG_LOCK_FLAGS, "worktree", "add", worktreePath, branch],
+        repoDir,
+      ).pipe(
         Effect.catchAll((e) => {
           if (e.message.includes("invalid reference")) {
             return execGit(
-              ["worktree", "add", "-b", branch, worktreePath, "HEAD"],
+              [
+                ...NO_CONFIG_LOCK_FLAGS,
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktreePath,
+                opts?.baseBranch ?? "HEAD",
+              ],
               repoDir,
             );
           }
@@ -193,7 +222,15 @@ export const create = (
       );
     } else {
       yield* execGit(
-        ["worktree", "add", "-b", branch, worktreePath, "HEAD"],
+        [
+          ...NO_CONFIG_LOCK_FLAGS,
+          "worktree",
+          "add",
+          "-b",
+          branch,
+          worktreePath,
+          "HEAD",
+        ],
         repoDir,
       ).pipe(
         Effect.catchAll((e) => {
@@ -287,6 +324,14 @@ export const pruneStale = (
 
     if (entries === null) return;
 
+    // `git worktree list` canonicalizes paths via realpath. If repoDir or
+    // .sandcastle is a symlink, joining the un-canonicalized prefix produces
+    // strings that never match git's output, and every active worktree looks
+    // orphaned. Resolve the prefix once so the Set lookup below works.
+    const realWorktreesDir = yield* fs
+      .realPath(worktreesDir)
+      .pipe(Effect.catchAll(() => Effect.succeed(worktreesDir)));
+
     // Get the list of active worktree paths from git
     const worktreeList = yield* execGit(
       ["worktree", "list", "--porcelain"],
@@ -301,7 +346,7 @@ export const pruneStale = (
 
     // Remove any directory under .sandcastle/worktrees/ that is not an active worktree
     for (const entry of entries) {
-      const entryPath = join(worktreesDir, entry);
+      const entryPath = join(realWorktreesDir, entry);
       const isDir = yield* fs.stat(entryPath).pipe(
         Effect.map((s) => s.type === "Directory"),
         Effect.catchAll(() => Effect.succeed(false)),

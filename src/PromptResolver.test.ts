@@ -13,7 +13,7 @@ const run = <A, E>(effect: Effect.Effect<A, E, NodeContext.NodeContext>) =>
 describe("PromptResolver", () => {
   it("returns inline prompt when prompt is provided", async () => {
     const result = await run(resolvePrompt({ prompt: "do some work" }));
-    expect(result).toBe("do some work");
+    expect(result).toEqual({ text: "do some work", source: "inline" });
   });
 
   it("reads prompt from promptFile when provided", async () => {
@@ -22,7 +22,7 @@ describe("PromptResolver", () => {
     await writeFile(promptPath, "prompt from file");
 
     const result = await run(resolvePrompt({ promptFile: promptPath }));
-    expect(result).toBe("prompt from file");
+    expect(result).toEqual({ text: "prompt from file", source: "template" });
   });
 
   it("errors when both prompt and promptFile are provided", async () => {

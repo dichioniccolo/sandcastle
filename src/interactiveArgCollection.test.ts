@@ -48,6 +48,13 @@ describe("interactive arg collection", () => {
     vi.clearAllMocks();
   });
 
+  let promptFileCounter = 0;
+  const writePrompt = (text: string): string => {
+    const path = join(hostDir, `argcol-prompt-${promptFileCounter++}.md`);
+    writeFileSync(path, text);
+    return path;
+  };
+
   const makeTestProvider = (
     fakeInteractiveExec: (
       args: string[],
@@ -88,7 +95,7 @@ describe("interactive arg collection", () => {
     await interactive({
       agent: claudeCode("claude-opus-4-6"),
       sandbox: provider,
-      prompt: "Fix bug in {{COMPONENT}}",
+      promptFile: writePrompt("Fix bug in {{COMPONENT}}"),
     });
 
     expect(mockText).toHaveBeenCalledOnce();
@@ -111,7 +118,7 @@ describe("interactive arg collection", () => {
     await interactive({
       agent: claudeCode("claude-opus-4-6"),
       sandbox: provider,
-      prompt: "Fix bug in {{COMPONENT}}",
+      promptFile: writePrompt("Fix bug in {{COMPONENT}}"),
       promptArgs: { COMPONENT: "LoginForm" },
     });
 
@@ -126,7 +133,7 @@ describe("interactive arg collection", () => {
     await interactive({
       agent: claudeCode("claude-opus-4-6"),
       sandbox: provider,
-      prompt: "A plain prompt with no placeholders",
+      promptFile: writePrompt("A plain prompt with no placeholders"),
     });
 
     expect(mockText).not.toHaveBeenCalled();
@@ -138,7 +145,9 @@ describe("interactive arg collection", () => {
     await interactive({
       agent: claudeCode("claude-opus-4-6"),
       sandbox: provider,
-      prompt: "Branch {{SOURCE_BRANCH}} target {{TARGET_BRANCH}}",
+      promptFile: writePrompt(
+        "Branch {{SOURCE_BRANCH}} target {{TARGET_BRANCH}}",
+      ),
     });
 
     expect(mockText).not.toHaveBeenCalled();
@@ -156,7 +165,7 @@ describe("interactive arg collection", () => {
     await interactive({
       agent: claudeCode("claude-opus-4-6"),
       sandbox: provider,
-      prompt: "Fix {{COMPONENT}} issue #{{ISSUE_NUM}}",
+      promptFile: writePrompt("Fix {{COMPONENT}} issue #{{ISSUE_NUM}}"),
     });
 
     expect(mockText).toHaveBeenCalledTimes(2);
@@ -185,7 +194,7 @@ describe("interactive arg collection", () => {
     await interactive({
       agent: claudeCode("claude-opus-4-6"),
       sandbox: provider,
-      prompt: "Fix {{COMPONENT}} issue #{{ISSUE_NUM}}",
+      promptFile: writePrompt("Fix {{COMPONENT}} issue #{{ISSUE_NUM}}"),
       promptArgs: { COMPONENT: "LoginForm" },
     });
 

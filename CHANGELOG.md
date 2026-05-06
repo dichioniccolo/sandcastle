@@ -1,5 +1,62 @@
 # @ai-hero/sandcastle
 
+## 0.5.8
+
+### Patch Changes
+
+- 7400ead: Add a short hint to the `parallel-planner` and `parallel-planner-with-review` plan prompts noting that the issues list is already filtered, so the planner agent is less likely to requery and pick up issues outside the configured filter.
+- 21b6442: Fix Windows hosts emitting backslash separators for in-container paths during session capture/resume and `copyPaths`. `sandboxSessionStore`, `defaultSessionPathsLayer`, and `startSandbox`'s `copyPaths` now use POSIX joins for paths that target the Linux container, so `docker cp` / `podman cp` no longer reject them on Windows.
+
+## 0.5.7
+
+### Patch Changes
+
+- 904ad82: Fix `PromptError: Prompt argument "{{TASK_ID}}" has no matching value in promptArgs` thrown on every iteration of the `simple-loop`, `sequential-reviewer`, and `parallel-planner*` merge flows after `sandcastle init`. The `VIEW_TASK_COMMAND` and `CLOSE_TASK_COMMAND` registry values used to embed `{{TASK_ID}}`, which got baked into prompts whose runtime promptArgs do not include `TASK_ID`. They now use a plain `<ID>` placeholder for the agent to fill in from surrounding context.
+
+## 0.5.6
+
+### Patch Changes
+
+- 54b5111: Add `timeouts.copyToWorktreeMs` option to override the host-to-worktree copy timeout (default: 60 000 ms).
+- d8484ca: Surface fallback `cp -R` failures from `copyToWorktree` as a typed `CopyToWorktreeError` instead of silently swallowing them
+- b6cc84f: Fix `WorktreeManager.pruneStale` deleting active worktrees when `.sandcastle` (or any ancestor of the repo directory) is a symlink. `git worktree list` returns canonicalized paths, so the un-canonicalized prefix never matched the active set and parallel `createSandbox()` calls would wipe each other's worktrees mid-run, surfacing as `spawn /bin/sh ENOENT`.
+- 26920ca: Fix `branchStrategy.baseBranch` being silently dropped when calling `sandcastle.run()` with a worktree-based sandbox. New branches now correctly fork from the requested `baseBranch` instead of the host's HEAD.
+- bbb0f39: Fix `encodeProjectPath` to handle Windows paths by replacing backslashes with hyphens and stripping drive-letter colons, producing a valid single directory-name component on Windows.
+- b2123e4: Add optional `timeoutMs` field to hook objects, allowing per-hook timeout overrides with fallback to the default 60s
+- a658fcc: Update Quick Start install command to recommend `--save-dev` and note that Sandcastle is a dev/CI tool
+- 425b77e: Use APFS clonefile (`cp -cR`) on macOS for copy-to-worktree instead of GNU `--reflink=auto`, giving Mac users instant copy-on-write on APFS volumes
+
+## 0.5.5
+
+### Patch Changes
+
+- e868d2d: Fix `createWorktree` failing with "already exists" when reusing a preserved mid-rebase worktree. Collision detection now also matches by target path, covering the detached-HEAD state during an in-progress rebase.
+
+## 0.5.4
+
+### Patch Changes
+
+- 9c8516d: Surface agent error details in `AgentError` when stderr is empty. Error events emitted to stdout by Codex and Pi, plus OpenCode's result text, are now parsed and included in the error message instead of being dropped.
+- b2cc893: Show context window size per iteration in the run summary. Each iteration with usage data emits a `Context window: NNNk` line (tokens rounded up to the nearest 1000) in both terminal and log-to-file mode.
+- 2843c1b: Support `baseBranch` when creating sandboxes, so new branches can be forked from a specified ref. Available both on `createSandbox` and in the named branch strategy.
+- d860e84: Fix Beads Dockerfile build failure on arm64 hosts (e.g. Apple Silicon). The image now builds on both amd64 and arm64.
+- fdd9b9e: Fix built-in review prompt templates so they respect the configured source branch instead of always diffing against `main`.
+- cfbeb67: Fix parallel-planner-with-review template to capture reviewer result and merge commits from both implementer and reviewer runs
+- eb03260: Fix transient worktree creation failure when `branch.autoSetupMerge` or `push.autoSetupRemote` is enabled globally
+- 4032e64: Inline prompts (`prompt: "..."`) are now passed to the agent literally — no `{{KEY}}` substitution, no `` !`command` `` expansion, no built-in `{{SOURCE_BRANCH}}` / `{{TARGET_BRANCH}}` injection. Fixes #453: callers that build inline prompts from arbitrary content (issue bodies, PR descriptions) no longer fail when that content happens to contain `{{...}}`. Passing `promptArgs` alongside an inline prompt is now an error; use `promptFile` to opt into template behavior.
+- 6bc4d74: Fix `PromptPreprocessor` executing `` !`...` `` patterns that arrive via `promptArgs` substitution. Argument values are now treated as inert data: only shell blocks written in the raw template are executed. Previously, any caller passing text through `promptArgs` (issue titles, bodies, docs excerpts, etc.) could hit spurious command execution — or, with untrusted inputs, remote shell execution — because the preprocessor scanned the fully-assembled prompt after substitution.
+- 359907e: Add `onAgentStreamEvent` option to `logging` in log-to-file mode. The callback receives each `text` chunk and `toolCall` emitted by the agent, with the iteration number and a timestamp, so callers can forward the agent's output stream to an external observability system. Errors thrown by the callback are swallowed so a broken forwarder cannot kill the run.
+- ce1bf1b: Support tilde expansion in `sandboxPath` for Docker and Podman mount configs.
+
+  Users can now write `sandboxPath: "~/.npm"` and it expands to `/home/agent/.npm` inside the sandbox. The expansion uses the provider's declared `sandboxHomedir` (`"/home/agent"` for Docker and Podman). Using `~` in `sandboxPath` with a provider that has no `sandboxHomedir` throws a descriptive error at mount resolution time.
+
+## 0.5.3
+
+### Patch Changes
+
+- 2e7147b: Show commit-aware sync logs only for isolated sandboxes. Displays "Syncing N commit(s) to host" when commits exist or "No commits to sync out" when there are none, instead of the generic "Syncing changes to host" message. Bind-mount providers no longer show sync logs since sync-out only applies to isolated sandboxes.
+- b0d5400: Fix git worktree mounts broken on Windows hosts (issue #410). On Windows, the parent `.git` directory is now mounted at a deterministic POSIX path inside the sandbox, and the worktree's `.git` file is patched with a corrected `gitdir:` path that resolves inside the Linux container.
+
 ## 0.5.2
 
 ### Patch Changes

@@ -14,14 +14,19 @@ import { mergeProviderEnv } from "./mergeProviderEnv.js";
 import { orchestrate, type IterationResult } from "./Orchestrator.js";
 import { defaultSessionPathsLayer } from "./SessionPaths.js";
 import {
+  callbackAgentStreamEmitterLayer,
+  noopAgentStreamEmitterLayer,
+} from "./AgentStreamEmitter.js";
+import {
   type PromptArgs,
   substitutePromptArgs,
+  validateNoArgsWithInlinePrompt,
   validateNoBuiltInArgOverride,
   BUILT_IN_PROMPT_ARG_KEYS,
 } from "./PromptArgumentSubstitution.js";
 import { resolvePrompt } from "./PromptResolver.js";
 import { preprocessPrompt } from "./PromptPreprocessor.js";
-import type { LoggingOption } from "./run.js";
+import type { LoggingOption, Timeouts } from "./run.js";
 import { buildLogFilename, printFileDisplayStartup } from "./run.js";
 import {
   withSandboxLifecycle,
@@ -44,10 +49,16 @@ import { syncOut } from "./syncOut.js";
 import * as WorktreeManager from "./WorktreeManager.js";
 import { copyToWorktree } from "./CopyToWorktree.js";
 import { resolveCwd } from "./resolveCwd.js";
+import { patchGitMountsForWindows } from "./mountUtils.js";
 
 export interface CreateSandboxOptions {
   /** Explicit branch for the worktree (required). */
   readonly branch: string;
+  /**
+   * Ref to fork from when `branch` does not yet exist. Ignored when the branch
+   * already exists. Defaults to `HEAD`.
+   */
+  readonly baseBranch?: string;
   /** Sandbox provider (e.g. docker({ imageName: "sandcastle:myrepo" })). */
   readonly sandbox: SandboxProvider;
   /**
@@ -63,6 +74,8 @@ export interface CreateSandboxOptions {
   readonly hooks?: SandboxHooks;
   /** Paths relative to the host repo root to copy into the worktree at creation time. */
   readonly copyToWorktree?: string[];
+  /** Override default timeouts for built-in lifecycle steps. Unset keys keep their defaults. */
+  readonly timeouts?: Timeouts;
   /** @internal Test-only overrides to bypass the sandbox provider. */
   readonly _test?: {
     readonly buildSandboxLayer?: (
@@ -214,11 +227,13 @@ const buildSandboxHandle = (
         maxIterations = 1,
       } = runOptions;
 
-      const rawPrompt = await Effect.runPromise(
+      const resolved = await Effect.runPromise(
         resolvePrompt({ prompt, promptFile }).pipe(
           Effect.provide(NodeContext.layer),
         ),
       );
+      const rawPrompt = resolved.text;
+      const isInlinePrompt = resolved.source === "inline";
 
       const userArgs = runOptions.promptArgs ?? {};
       const currentHostBranch = await Effect.runPromise(
@@ -230,6 +245,10 @@ const buildSandboxHandle = (
 
       const resolvedPrompt = await Effect.runPromise(
         Effect.gen(function* () {
+          if (isInlinePrompt) {
+            yield* validateNoArgsWithInlinePrompt(userArgs);
+            return rawPrompt;
+          }
           yield* validateNoBuiltInArgOverride(userArgs);
           const effectiveArgs = {
             SOURCE_BRANCH: branch,
@@ -285,10 +304,16 @@ const buildSandboxHandle = (
           ) as any,
       });
 
+      const agentStreamEmitterLayer =
+        resolvedLogging.type === "file" && resolvedLogging.onAgentStreamEvent
+          ? callbackAgentStreamEmitterLayer(resolvedLogging.onAgentStreamEvent)
+          : noopAgentStreamEmitterLayer;
+
       const runLayer = Layer.mergeAll(
         reuseFactoryLayer,
         runDisplayLayer,
         defaultSessionPathsLayer,
+        agentStreamEmitterLayer,
       );
 
       let result;
@@ -308,6 +333,7 @@ const buildSandboxHandle = (
               idleTimeoutSeconds: runOptions.idleTimeoutSeconds,
               name: runOptions.name,
               signal: runOptions.signal,
+              skipPromptExpansion: isInlinePrompt,
             });
           }).pipe(Effect.provide(runLayer)),
         );
@@ -354,24 +380,34 @@ const buildSandboxHandle = (
       try {
         lifecycleResult = await Effect.runPromise(
           Effect.gen(function* () {
-            const rawPrompt = yield* resolvePrompt({ prompt, promptFile });
+            const resolved = yield* resolvePrompt({ prompt, promptFile });
+            const rawPrompt = resolved.text;
+            const isInlinePrompt = resolved.source === "inline";
 
             const userArgs = interactiveOptions.promptArgs ?? {};
             const currentHostBranch =
               yield* WorktreeManager.getCurrentBranch(hostRepoDir);
 
-            yield* validateNoBuiltInArgOverride(userArgs);
-            const effectiveArgs = {
-              SOURCE_BRANCH: branch,
-              TARGET_BRANCH: currentHostBranch,
-              ...userArgs,
-            };
-            const builtInArgKeysSet = new Set<string>(BUILT_IN_PROMPT_ARG_KEYS);
-            const resolvedPrompt = yield* substitutePromptArgs(
-              rawPrompt,
-              effectiveArgs,
-              builtInArgKeysSet,
-            );
+            let resolvedPrompt: string;
+            if (isInlinePrompt) {
+              yield* validateNoArgsWithInlinePrompt(userArgs);
+              resolvedPrompt = rawPrompt;
+            } else {
+              yield* validateNoBuiltInArgOverride(userArgs);
+              const effectiveArgs = {
+                SOURCE_BRANCH: branch,
+                TARGET_BRANCH: currentHostBranch,
+                ...userArgs,
+              };
+              const builtInArgKeysSet = new Set<string>(
+                BUILT_IN_PROMPT_ARG_KEYS,
+              );
+              resolvedPrompt = yield* substitutePromptArgs(
+                rawPrompt,
+                effectiveArgs,
+                builtInArgKeysSet,
+              );
+            }
 
             return yield* withSandboxLifecycle(
               {
@@ -383,11 +419,13 @@ const buildSandboxHandle = (
               },
               (ctx) =>
                 Effect.gen(function* () {
-                  const fullPrompt = yield* preprocessPrompt(
-                    resolvedPrompt,
-                    ctx.sandbox,
-                    ctx.sandboxRepoDir,
-                  );
+                  const fullPrompt = isInlinePrompt
+                    ? resolvedPrompt
+                    : yield* preprocessPrompt(
+                        resolvedPrompt,
+                        ctx.sandbox,
+                        ctx.sandboxRepoDir,
+                      );
 
                   const interactiveArgs = provider.buildInteractiveArgs!({
                     prompt: fullPrompt,
@@ -464,6 +502,7 @@ export interface CreateSandboxFromWorktreeOptions {
   readonly sandbox: SandboxProvider;
   readonly hooks?: SandboxHooks;
   readonly copyToWorktree?: string[];
+  readonly timeouts?: Timeouts;
   readonly _test?: {
     readonly buildSandboxLayer?: (
       sandboxDir: string,
@@ -489,7 +528,7 @@ export const createSandboxFromWorktree = async (
     options.sandbox.tag !== "isolated"
   ) {
     await Effect.runPromise(
-      copyToWorktree(options.copyToWorktree, hostRepoDir, worktreePath),
+      copyToWorktree(options.copyToWorktree, hostRepoDir, worktreePath, options.timeouts?.copyToWorktreeMs),
     );
   }
 
@@ -529,6 +568,17 @@ export const createSandboxFromWorktree = async (
       startEffect = resolveGitMounts(join(hostRepoDir, ".git")).pipe(
         Effect.provide(NodeFileSystem.layer),
         Effect.catchAll(() => Effect.succeed([])),
+        // Patch git mounts for Windows worktree compatibility (ADR-0006)
+        Effect.flatMap((gitMounts) =>
+          Effect.tryPromise({
+            try: () =>
+              patchGitMountsForWindows(gitMounts, worktreePath, SANDBOX_REPO_DIR),
+            catch: (e) =>
+              new Error(
+                `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
+              ),
+          }),
+        ),
         Effect.flatMap((gitMounts) =>
           startSandbox({
             provider,
@@ -628,6 +678,7 @@ export const createSandbox = async (
       );
       const worktreeInfo = yield* WorktreeManager.create(hostRepoDir, {
         branch,
+        baseBranch: options.baseBranch,
       });
       return { hostRepoDir, worktreeInfo };
     }).pipe(Effect.provide(NodeContext.layer)),
@@ -642,7 +693,7 @@ export const createSandbox = async (
     options.sandbox.tag !== "isolated"
   ) {
     await Effect.runPromise(
-      copyToWorktree(options.copyToWorktree, hostRepoDir, worktreePath),
+      copyToWorktree(options.copyToWorktree, hostRepoDir, worktreePath, options.timeouts?.copyToWorktreeMs),
     );
   }
 
@@ -690,6 +741,17 @@ export const createSandbox = async (
       startEffect = resolveGitMounts(join(hostRepoDir, ".git")).pipe(
         Effect.provide(NodeFileSystem.layer),
         Effect.catchAll(() => Effect.succeed([])),
+        // Patch git mounts for Windows worktree compatibility (ADR-0006)
+        Effect.flatMap((gitMounts) =>
+          Effect.tryPromise({
+            try: () =>
+              patchGitMountsForWindows(gitMounts, worktreePath, SANDBOX_REPO_DIR),
+            catch: (e) =>
+              new Error(
+                `Failed to patch git mounts: ${e instanceof Error ? e.message : String(e)}`,
+              ),
+          }),
+        ),
         Effect.flatMap((gitMounts) =>
           startSandbox({
             provider,
